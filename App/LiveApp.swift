@@ -1,7 +1,7 @@
 import SwiftUI
 import AVKit
 
-private let background = Color(red: 0.047, green: 0.071, blue: 0.067)
+private let appBackground = Color(red: 0.047, green: 0.071, blue: 0.067)
 private let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
 private let lime = Color(red: 0.792, green: 0.98, blue: 0.459)
 private let origin = URL(string: "https://live.chepushkavpn.fun/")!
@@ -103,7 +103,7 @@ private struct Home: View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 HStack {
-                    Text("C").font(.title3.bold()).foregroundStyle(background)
+                    Text("C").font(.title3.bold()).foregroundStyle(appBackground)
                         .frame(width: 34, height: 34).background(lime, in: Circle())
                     Text("Чепушка Live").font(.headline.weight(.black))
                     Spacer()
@@ -123,7 +123,7 @@ private struct Home: View {
                                         Button { filter = value } label: {
                                             Text(value).font(.subheadline).padding(.horizontal, 14)
                                                 .padding(.vertical, 9)
-                                                .foregroundStyle(filter == value ? background : .white)
+                                                .foregroundStyle(filter == value ? appBackground : .white)
                                                 .background(filter == value ? lime : surface, in: RoundedRectangle(cornerRadius: 10))
                                         }
                                     }
@@ -150,7 +150,7 @@ private struct Home: View {
                     tabButton("Профиль", "person.crop.circle")
                 }.padding(.vertical, 8).background(surface)
             }
-            .background(background.ignoresSafeArea())
+            .background(appBackground.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Route.self) { route in
                 switch route {
@@ -186,7 +186,7 @@ private struct FeedCard: View {
                 .overlay(alignment: .bottomTrailing) {
                     Text(video.live ? "В ЭФИРЕ" : clock(video.duration ?? 0))
                         .font(.caption.bold()).padding(6)
-                        .foregroundStyle(video.live ? background : .white)
+                        .foregroundStyle(video.live ? appBackground : .white)
                         .background(video.live ? lime : .black.opacity(0.8), in: RoundedRectangle(cornerRadius: 6))
                         .padding(9)
                 }.clipShape(RoundedRectangle(cornerRadius: 15))
@@ -230,7 +230,7 @@ private struct ChannelScreen: View {
                         Button(subscribed ? "✓  Вы подписаны" : "Подписаться") {
                             if !subscribed { followed = (followed.isEmpty ? "" : followed + ",") + id }
                         }.buttonStyle(.borderedProminent).tint(subscribed ? surface : lime)
-                            .foregroundStyle(subscribed ? lime : background)
+                            .foregroundStyle(subscribed ? lime : appBackground)
                         if subscribed {
                             Button("Отписаться") {
                                 followed = followed.split(separator: ",").filter { $0 != Substring(id) }.joined(separator: ",")
@@ -264,7 +264,7 @@ private struct ChannelScreen: View {
             } else { ProgressView().padding() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(background.ignoresSafeArea())
+        .background(appBackground.ignoresSafeArea())
         .navigationTitle(channel?.profile.name ?? "Канал")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
@@ -321,7 +321,7 @@ private struct Watch: View {
                 }
             }.padding(16)
         }
-        .background(background.ignoresSafeArea())
+        .background(appBackground.ignoresSafeArea())
         .navigationTitle("Сейчас смотрите")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
@@ -465,3 +465,4 @@ private struct LocalPlayer: View {
         if started { player.seek(to: CMTime(seconds: position, preferredTimescale: 600)) }
     }
 }
+
