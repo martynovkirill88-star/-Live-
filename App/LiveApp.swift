@@ -332,7 +332,6 @@ private struct WatchComments: Decodable {
     let enabled: Bool?
 }
 
-private struct WatchSocial: Decodable { let likes: Int }
 
 private struct Watch: View {
     @EnvironmentObject private var auth: LiveSession
@@ -346,7 +345,6 @@ private struct Watch: View {
     @AppStorage("likedVideos") private var liked = ""
     @AppStorage("dislikedVideos") private var disliked = ""
     @State private var comments: WatchComments?
-    @State private var social: WatchSocial?
     @State private var subscribers: Int?
     @State private var authorIsOwner: Bool?
     @State private var commentsOpen = false
@@ -366,15 +364,11 @@ private struct Watch: View {
         return ids.joined(separator: ",")
     }
 
-    private func actionLabel(_ icon: String, _ title: String? = nil, selected: Bool = false) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon).font(.system(size: 16))
-                .foregroundStyle(selected ? lime : .white)
-            if let title { Text(title).font(.caption.weight(.medium)).lineLimit(1) }
-        }
-        .frame(maxWidth: .infinity, minHeight: 44)
-        .padding(.horizontal, 4)
-        .background(surface, in: RoundedRectangle(cornerRadius: 13))
+    private func actionLabel(_ icon: String, selected: Bool = false) -> some View {
+        Image(systemName: icon).font(.system(size: 20))
+            .foregroundStyle(selected ? lime : .white)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
     }
 
     private var actionRow: some View {
@@ -384,8 +378,7 @@ private struct Watch: View {
                 liked = setting(liked, video.id, enabled: !hasLiked)
                 disliked = setting(disliked, video.id, enabled: false)
             } label: {
-                let count = (social?.likes ?? 0) + (hasLiked ? 1 : 0)
-                actionLabel(hasLiked ? "hand.thumbsup.fill" : "hand.thumbsup", count > 0 ? String(count) : nil, selected: hasLiked)
+                actionLabel(hasLiked ? "hand.thumbsup.fill" : "hand.thumbsup", selected: hasLiked)
             }.accessibilityLabel("Нравится")
             Button {
                 guard auth.requireLogin() else { return }
@@ -395,8 +388,8 @@ private struct Watch: View {
                 actionLabel(hasDisliked ? "hand.thumbsdown.fill" : "hand.thumbsdown", selected: hasDisliked)
             }.accessibilityLabel("Не нравится")
             ShareLink(item: origin.appendingPathComponent("watch").appendingPathComponent(video.id)) {
-                actionLabel("arrowshape.turn.up.right", "Поделиться").layoutPriority(1)
-            }.fixedSize(horizontal: true, vertical: false)
+                actionLabel("arrowshape.turn.up.right")
+            }.accessibilityLabel("Поделиться")
             Button { if auth.requireLogin() { saved = setting(saved, video.id, enabled: !isSaved) } } label: {
                 actionLabel(isSaved ? "bookmark.fill" : "bookmark", selected: isSaved)
             }.accessibilityLabel(isSaved ? "Убрать из избранного" : "В избранное")
@@ -524,7 +517,6 @@ private struct Watch: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .task { await loadComments() }
-        .task { social = try? await request("/api/media/" + video.id + "/social") }
         .task {
             if let id = video.channel_id {
                 let channel: Channel? = try? await request("/api/channels/" + id)
@@ -882,6 +874,10 @@ private struct TelegramSignIn: View {
 }
 
 private struct CreatorHome: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var editingVideo: Video?
+    @State private var deletingVideo: Video?
+    @State private var managementError = ""
     @State private var avatarSelection: PhotosPickerItem?
     struct Profile: Decodable {
         let id, name, about: String
@@ -933,17 +929,32 @@ private struct CreatorHome: View {
                     Text("Ваши видео").font(.custom("DelaGothicOne-Regular", size: 19))
                     if videos.isEmpty { Text("На канале пока нет видео.").foregroundStyle(.secondary) }
                     ForEach(videos) { video in
-                        NavigationLink(value: Route.video(video)) {
-                            HStack {
-                                Artwork(path: video.poster).frame(width: 108, height: 61)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                VStack(alignment: .leading) {
-                                    Text(video.title).lineLimit(2)
-                                    Text(publicationStatus(video)).font(.caption).foregroundStyle(lime)
+                        HStack(spacing: 10) {
+                            NavigationLink(value: Route.video(video)) {
+                                HStack(spacing: 10) {
+                                    Artwork(path: video.poster).frame(width: 108, height: 61)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    VStack(alignment: .leading) {
+                                        Text(video.title).lineLimit(2)
+                                        Text(publicationStatus(video)).font(.caption).foregroundStyle(lime)
+                                    }
+                                    Spacer(minLength: 0)
                                 }
+                            }.buttonStyle(.plain).disabled(video.status != "ready" && video.status != "live")
+                            if !video.live && video.status != "scheduled" && video.status != "starting" {
+                                Menu {
+                                    Button { editingVideo = video } label: { Label("Изменить видео", systemImage: "pencil") }
+                                        .disabled(video.status != "ready")
+                                    Button(role: .destructive) { deletingVideo = video } label: {
+                                        Label("Удалить видео", systemImage: "trash")
+                                    }
+                                } label: {
+                                    Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(Rectangle())
+                                }.accessibilityLabel("Управление видео")
                             }
-                        }.buttonStyle(.plain).disabled(video.status != "ready" && video.status != "live")
+                        }
                     }
+                    if !managementError.isEmpty { Text(managementError).font(.caption) }
                 } else if auth.account == nil {
                     Text("Создайте канал, чтобы публиковать видео.").foregroundStyle(.secondary)
                     Button("Создать канал") { auth.showLogin = true }.buttonStyle(.borderedProminent)
@@ -957,8 +968,26 @@ private struct CreatorHome: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
         }
-        .task(id: auth.account?.name) { await load() }
-        .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await load() } }) {
+        .task(id: auth.account?.name) {
+            await load()
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 12_000_000_000) } catch { return }
+                if scenePhase == .active && !publishing { await refreshVideos() }
+            }
+        }
+        .refreshable { await refreshVideos() }
+        .sheet(item: $editingVideo, onDismiss: { Task { await refreshVideos() } }) { video in
+            EditPublishedVideo(video: video)
+        }
+        .confirmationDialog("Удалить видео?", isPresented: Binding(
+            get: { deletingVideo != nil },
+            set: { if !$0 { deletingVideo = nil } }
+        ), titleVisibility: .visible, presenting: deletingVideo) { video in
+            Button("Удалить", role: .destructive) { Task { await removeVideo(video) } }
+        } message: { video in
+            Text("«\(video.title)» будет удалено без возможности восстановления.")
+        }
+        .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await refreshVideos() } }) {
             PublishVideo(channel: profile?.name ?? "")
         }
     }
@@ -1036,6 +1065,22 @@ private struct CreatorHome: View {
         }
         return "Скрыто"
     }
+    private func refreshVideos() async {
+        guard let id = profile?.id else { return }
+        guard let studio: Catalog = try? await request("/api/admin/media"),
+              !Task.isCancelled, profile?.id == id else { return }
+        videos = studio.items.filter { $0.channel_id == id }
+    }
+
+    private func removeVideo(_ video: Video) async {
+        deletingVideo = nil
+        managementError = ""
+        do {
+            let _: WriteResult = try await request("/api/admin/media/" + video.id, method: "DELETE")
+            videos.removeAll { $0.id == video.id }
+            await refreshVideos()
+        } catch { managementError = error.localizedDescription }
+    }
     private func load() async {
         profile = nil
         videos = []
@@ -1049,9 +1094,59 @@ private struct CreatorHome: View {
                 videos = channel.videos
                 subscribers = channel.subscribers
             }
-            if let studio: Catalog = try? await request("/api/admin/media") {
-                videos = studio.items.filter { $0.channel_id == owner.id }
+            await refreshVideos()
+        } catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct EditPublishedVideo: View {
+    let video: Video
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var description: String
+    @State private var error = ""
+    @State private var busy = false
+
+    init(video: Video) {
+        self.video = video
+        _title = State(initialValue: video.title)
+        _description = State(initialValue: video.description ?? "")
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            creatorHeader("Изменить видео", icon: "chevron.left", disabled: busy) { dismiss() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Название видео").font(.caption).foregroundStyle(.secondary)
+                    TextField("Название", text: $title).padding(12).creatorField()
+                    Text("Описание").font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: $description).scrollContentBackground(.hidden)
+                        .frame(minHeight: 120).padding(8).creatorField()
+                    if video.publication_policy != "private" {
+                        Label("После сохранения видео снова отправится на модерацию.", systemImage: "info.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if !error.isEmpty { Text(error).font(.caption) }
+                }.padding(16).disabled(busy)
             }
+            creatorButton(busy ? "Сохраняем…" : "Сохранить") { Task { await save() } }
+                .disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                          (title == video.title && description == (video.description ?? "")))
+                .padding(16)
+        }
+        .background(appBackground.ignoresSafeArea())
+        .interactiveDismissDisabled(busy)
+    }
+
+    private func save() async {
+        busy = true
+        error = ""
+        defer { busy = false }
+        do {
+            let _: WriteResult = try await request("/api/admin/media/" + video.id + "/owner-edit",
+                method: "PATCH", json: ["title": title, "description": description])
+            dismiss()
         } catch { self.error = error.localizedDescription }
     }
 }
@@ -1074,6 +1169,7 @@ private struct PublishVideo: View {
     @State private var description = ""
     @State private var busy = false
     @State private var progress = 0.0
+    @State private var uploadPhase = "Подготавливаем видео…"
     @State private var status = ""
     @State private var transfer: Transfer?
     @State private var submitted = false
@@ -1091,29 +1187,33 @@ private struct PublishVideo: View {
                     status = ""
                 }
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(file == nil ? "01 / ВЫБОР ВИДЕО" : "02 / ОФОРМЛЕНИЕ")
-                        .font(.caption2.bold()).foregroundStyle(lime)
-                    HStack(spacing: 8) {
-                        Capsule().fill(lime).frame(height: 2)
-                        Capsule().fill(file == nil ? surface : lime).frame(height: 2)
-                    }
-                    if let file { details(file) } else { picker }
-                    if !status.isEmpty { Text(status).font(.caption) }
-                }.padding(16)
-            }
-            Divider()
-            if let file {
-                creatorButton(submitted ? "Готово" : "Опубликовать") {
-                    if submitted { clearMovie(); dismiss() } else { Task { await upload(file) } }
-                }.disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .padding(16)
+            if busy {
+                uploadProgress
             } else {
-                VStack(spacing: 6) {
-                    Text("Далее — оформление видео").font(.subheadline)
-                    Text("Название, описание, обложка и доступ").font(.caption2)
-                }.foregroundStyle(.secondary).padding(16)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(file == nil ? "01 / ВЫБОР ВИДЕО" : "02 / ОФОРМЛЕНИЕ")
+                            .font(.caption2.bold()).foregroundStyle(lime)
+                        HStack(spacing: 8) {
+                            Capsule().fill(lime).frame(height: 2)
+                            Capsule().fill(file == nil ? surface : lime).frame(height: 2)
+                        }
+                        if let file { details(file) } else { picker }
+                        if !status.isEmpty { Text(status).font(.caption) }
+                    }.padding(16)
+                }
+                Divider()
+                if let file {
+                    creatorButton(submitted ? "Готово" : "Опубликовать") {
+                        if submitted { clearMovie(); dismiss() } else { Task { await upload(file) } }
+                    }.disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .padding(16)
+                } else {
+                    VStack(spacing: 6) {
+                        Text("Далее — оформление видео").font(.subheadline)
+                        Text("Название, описание, обложка и доступ").font(.caption2)
+                    }.foregroundStyle(.secondary).padding(16)
+                }
             }
         }
         .background(appBackground.ignoresSafeArea())
@@ -1135,6 +1235,18 @@ private struct PublishVideo: View {
                 title = String(movie.url.deletingPathExtension().lastPathComponent.prefix(100))
             } catch is CancellationError {} catch { status = "Не удалось загрузить видео из медиатеки. " + error.localizedDescription }
         }
+    }
+
+    private var uploadProgress: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "arrow.up.circle").font(.system(size: 54)).foregroundStyle(lime)
+            Text("Загрузка видео").font(.title2.bold())
+            Text(title).font(.subheadline).lineLimit(2).foregroundStyle(.secondary)
+            ProgressView(value: progress).tint(lime)
+            Text(progress.formatted(.percent.precision(.fractionLength(0)))).monospacedDigit()
+            Text(uploadPhase).font(.subheadline).foregroundStyle(.secondary)
+        }.multilineTextAlignment(.center).padding(30)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var picker: some View {
@@ -1262,6 +1374,7 @@ private struct PublishVideo: View {
 
     private func upload(_ file: URL) async {
         busy = true
+        uploadPhase = "Подготавливаем видео…"
         status = ""
         let accessed = file.startAccessingSecurityScopedResource()
         defer { if accessed { file.stopAccessingSecurityScopedResource() }; busy = false }
@@ -1282,6 +1395,8 @@ private struct PublishVideo: View {
             if let previous = transfer { state = try await request(endpoint + "/" + previous.id) }
             else { state = try await request(endpoint, method: "POST", json: ["size": size]) }
             transfer = state
+            progress = Double(state.offset) / Double(size)
+            uploadPhase = "Передаём файл на сервер…"
             let uploadPath = endpoint + "/" + state.id
             while state.offset < size {
                 try handle.seek(toOffset: UInt64(state.offset))
@@ -1294,6 +1409,7 @@ private struct PublishVideo: View {
                 state = next
                 progress = Double(state.offset) / Double(size)
             }
+            uploadPhase = "Файл передан. Добавляем в очередь обработки…"
             var settings: [String: Any] = [
                 "title": title, "description": description, "published": !privateVideo,
                 "publication_policy": privateVideo ? "private" : "public", "comments_enabled": commentsEnabled
@@ -1373,6 +1489,8 @@ private struct GalleryVideo: Transferable {
         }
     }
 }
+
+
 
 
 
