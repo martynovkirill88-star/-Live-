@@ -2,6 +2,7 @@ import SwiftUI
 import WebKit
 import CoreText
 import UniformTypeIdentifiers
+import PhotosUI
 
 private let appBackground = Color(red: 0.047, green: 0.071, blue: 0.067)
 private let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
@@ -733,6 +734,7 @@ private struct TelegramSignIn: View {
 }
 
 private struct CreatorHome: View {
+    @State private var avatarSelection: PhotosPickerItem?
     struct Profile: Decodable {
         let id, name, about: String
         let avatar: String?
@@ -808,6 +810,10 @@ private struct CreatorHome: View {
                     VStack(alignment: .leading, spacing: 14) {
                         Artwork(path: profile?.avatar).frame(width: 92, height: 92).clipShape(Circle())
                             .frame(maxWidth: .infinity)
+                        PhotosPicker(selection: $avatarSelection, matching: .images) {
+                            Label("Изменить фото", systemImage: "camera")
+                                .frame(maxWidth: .infinity)
+                        }.disabled(saving)
                         Text("Название канала").font(.caption).foregroundStyle(.secondary)
                         TextField("Название", text: $name).textFieldStyle(.roundedBorder)
                         Text("Описание").font(.caption).foregroundStyle(.secondary)
@@ -828,6 +834,16 @@ private struct CreatorHome: View {
                     }.padding(16)
                 }.background(appBackground.ignoresSafeArea()).navigationTitle("Изменить канал")
                     .navigationBarTitleDisplayMode(.inline)
+                    .task(id: avatarSelection) {
+                        guard let selection = avatarSelection else { return }
+                        saving = true
+                        defer { saving = false }
+                        do {
+                            let jpeg = try await jpegImage(selection, maximum: 512)
+                            profile = try await request("/api/admin/channel/avatar", method: "PUT", bytes: jpeg,
+                                                        headers: ["Content-Type": "image/jpeg"])
+                        } catch { self.error = error.localizedDescription }
+                    }
             }
         }
         .sheet(isPresented: $publishing) { PublishVideo(channel: profile?.name ?? "") }
@@ -847,6 +863,7 @@ private struct CreatorHome: View {
 }
 
 private struct PublishVideo: View {
+    @State private var cover: PhotosPickerItem?
     struct Transfer: Decodable { let id: String; let offset, chunk_size: Int }
     let channel: String
     @Environment(\.dismiss) private var dismiss
@@ -872,6 +889,9 @@ private struct PublishVideo: View {
                         TextField("Название", text: $title).textFieldStyle(.roundedBorder)
                         Text("Описание").font(.caption)
                         TextEditor(text: $description).frame(minHeight: 96)
+                        PhotosPicker(selection: $cover, matching: .images) {
+                            Label(cover == nil ? "Загрузить обложку" : "Обложка выбрана", systemImage: "photo")
+                        }.disabled(busy || submitted)
                         Label("Доступ для всех после модерации", systemImage: "globe")
                         if busy { ProgressView(value: progress) }
                         if !status.isEmpty { Text(status).font(.subheadline) }
@@ -918,6 +938,9 @@ private struct PublishVideo: View {
                   size > 0, size <= 2 * 1024 * 1024 * 1024 else {
                 throw ServerError(status: 400, message: "Выберите видео размером до 2 ГБ.")
             }
+            let coverData: Data?
+            if let cover { coverData = try await jpegImage(cover, maximum: 1280) }
+            else { coverData = nil }
             let handle = try FileHandle(forReadingFrom: file)
             defer { try? handle.close() }
             let endpoint = "/api/admin/uploads"
@@ -941,6 +964,28 @@ private struct PublishVideo: View {
                 json: ["title": title, "description": description, "published": true])
             submitted = true
             status = "Видео отправлено на модерацию."
+            if let coverData {
+                do {
+                    let _: WriteResult = try await request("/api/admin/media/" + state.id + "/cover",
+                        method: "PUT", bytes: coverData, headers: ["Content-Type": "image/jpeg"])
+                } catch { status += " Обложку сохранить не удалось." }
+            }
         } catch { status = error.localizedDescription }
+    }
+}
+
+
+@MainActor
+private func jpegImage(_ selection: PhotosPickerItem, maximum: CGFloat) async throws -> Data {
+    guard let data = try await selection.loadTransferable(type: Data.self), let source = UIImage(data: data),
+          source.size.width > 0, source.size.height > 0 else {
+        throw URLError(.cannotDecodeContentData)
+    }
+    let ratio = min(1, maximum / max(source.size.width, source.size.height))
+    let size = CGSize(width: max(1, source.size.width * ratio), height: max(1, source.size.height * ratio))
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    return UIGraphicsImageRenderer(size: size, format: format).jpegData(withCompressionQuality: 0.8) { _ in
+        source.draw(in: CGRect(origin: .zero, size: size))
     }
 }
