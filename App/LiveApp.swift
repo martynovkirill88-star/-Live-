@@ -686,8 +686,10 @@ private struct TelegramSignIn: View {
     struct Ticket: Decodable { let session_id, poll_token, code: String; let url: URL; let expires_in: Int }
     struct Poll: Decodable { let status: String }
     @EnvironmentObject private var auth: LiveSession
+    @Environment(\.scenePhase) private var scenePhase
     @State private var ticket: Ticket?
     @State private var status = ""
+    @State private var progressMessage = ""
     @State private var attempt = 0
 
     var body: some View {
@@ -700,6 +702,7 @@ private struct TelegramSignIn: View {
                     Link("Открыть Telegram", destination: ticket.url).buttonStyle(.borderedProminent)
                 }
             } else if status.isEmpty { ProgressView() }
+            if !progressMessage.isEmpty { Text(progressMessage).font(.subheadline).multilineTextAlignment(.center) }
             if !status.isEmpty {
                 Text(status).multilineTextAlignment(.center)
                 Button("Начать заново") { attempt += 1 }
@@ -710,26 +713,67 @@ private struct TelegramSignIn: View {
         .task(id: attempt) { await signIn() }
     }
 
+    @MainActor
     private func signIn() async {
         ticket = nil
         status = ""
+        progressMessage = ""
+        defer { progressMessage = "" }
         do {
             let login: Ticket = try await request("/api/auth/telegram/start", method: "POST", json: ["purpose": "creator"])
             ticket = login
             let expiry = Date().addingTimeInterval(Double(login.expires_in))
+            var shouldCheckSession = false
+            var confirmed = false
             while Date() < expiry {
                 try await Task.sleep(nanoseconds: 2_000_000_000)
-                let reply: Poll = try await request("/api/auth/telegram/poll", method: "POST",
-                    json: ["session_id": login.session_id, "poll_token": login.poll_token])
-                if reply.status == "authorized" {
+                guard scenePhase == .active else { continue }
+                if shouldCheckSession || confirmed {
                     await auth.refresh()
+                    try Task.checkCancellation()
+                    if auth.account != nil {
+                        auth.showLogin = false
+                        return
+                    }
+                    if confirmed {
+                        progressMessage = "Telegram подтвердил вход. Загружаем профиль…"
+                        continue
+                    }
+                }
+                do {
+                    let reply: Poll = try await request("/api/auth/telegram/poll", method: "POST",
+                        json: ["session_id": login.session_id, "poll_token": login.poll_token])
+                    confirmed = reply.status == "authorized"
+                    shouldCheckSession = false
+                    progressMessage = confirmed ? "Загружаем профиль…" : ""
+                } catch let error as URLError where [
+                    .networkConnectionLost, .notConnectedToInternet, .timedOut,
+                    .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .cancelled
+                ].contains(error.code) {
+                    try Task.checkCancellation()
+                    shouldCheckSession = true
+                    progressMessage = "Связь прервалась. Повторяем проверку входа…"
+                } catch let error as ServerError where error.status == 410 {
+                    // A lost response can still leave the session cookie on the device.
+                    await auth.refresh()
+                    try Task.checkCancellation()
                     if auth.account != nil { auth.showLogin = false }
-                    else { status = "Telegram подтвердил вход, но профиль не загрузился." }
+                    else { status = "Не удалось восстановить подтверждение. Начните вход заново." }
                     return
+                } catch let error as ServerError where error.status >= 500 || error.status == 429 {
+                    shouldCheckSession = true
+                    progressMessage = "Сервер временно недоступен. Повторяем проверку…"
                 }
             }
-            status = "Код истёк."
-        } catch is CancellationError {} catch { status = error.localizedDescription }
+            status = confirmed ? "Профиль не загрузился. Начните вход заново." : "Код истёк. Начните вход заново."
+        } catch is CancellationError {
+        } catch let error as URLError {
+            if !Task.isCancelled {
+                status = error.code == .notConnectedToInternet ? "Нет подключения к интернету." : "Не удалось связаться с сервером. Начните вход заново."
+            }
+        } catch {
+            if !Task.isCancelled { status = error.localizedDescription }
+        }
     }
 }
 
@@ -989,3 +1033,4 @@ private func jpegImage(_ selection: PhotosPickerItem, maximum: CGFloat) async th
         source.draw(in: CGRect(origin: .zero, size: size))
     }
 }
+
