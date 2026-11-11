@@ -1684,6 +1684,12 @@ private struct OwnerConsoleBrowser: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if action.navigationType == .linkActivated, let url = action.request.url,
+               url.scheme == "https", url.host == "t.me" {
+                UIApplication.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
             decisionHandler(action.request.url?.host == origin.host && action.request.url?.scheme == "https" ? .allow : .cancel)
         }
         private func presenter(_ view: WKWebView) -> UIViewController? {
