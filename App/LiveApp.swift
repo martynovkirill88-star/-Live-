@@ -5,7 +5,7 @@ import WebKit
 struct ChepushkaLiveApp: App {
     var body: some Scene {
         WindowGroup {
-            LiveBrowser()
+            LiveScreen()
                 .ignoresSafeArea(edges: [.bottom])
                 .background(Color(red: 0.047, green: 0.071, blue: 0.067).ignoresSafeArea())
                 .preferredColorScheme(.dark)
@@ -13,10 +13,47 @@ struct ChepushkaLiveApp: App {
     }
 }
 
-struct LiveBrowser: UIViewRepresentable {
-    private static let homepage = URL(string: "https://live.chepushkavpn.fun/")!
+private struct LiveScreen: View {
+    @State private var loading = true
+    @State private var failure: String?
+    @State private var attempt = UUID()
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    var body: some View {
+        ZStack {
+            LiveBrowser { result in
+                loading = false
+                failure = result
+            }
+            .id(attempt)
+            if loading || failure != nil {
+                VStack(spacing: 16) {
+                    Text("Чепушка Live").font(.title.bold())
+                    if let failure {
+                        Text(failure).multilineTextAlignment(.center)
+                        Button("Повторить") {
+                            loading = true
+                            self.failure = nil
+                            attempt = UUID()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Link("Открыть в Safari", destination: LiveBrowser.homepage)
+                    } else {
+                        ProgressView("Загружаем видео…")
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(red: 0.047, green: 0.071, blue: 0.067))
+            }
+        }
+    }
+}
+
+private struct LiveBrowser: UIViewRepresentable {
+    let onReady: (String?) -> Void
+    static let homepage = URL(string: "https://live.chepushkavpn.fun/")!
+
+    func makeCoordinator() -> Coordinator { Coordinator(onReady: onReady) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -36,7 +73,7 @@ struct LiveBrowser: UIViewRepresentable {
         view.isOpaque = false
         view.backgroundColor = UIColor(red: 0.047, green: 0.071, blue: 0.067, alpha: 1)
         view.scrollView.contentInsetAdjustmentBehavior = .never
-        view.load(URLRequest(url: Self.homepage))
+        context.coordinator.open(view)
         return view
     }
 
@@ -63,18 +100,60 @@ struct LiveBrowser: UIViewRepresentable {
             }
         }
 
+        private let onReady: (String?) -> Void
+        private var startup: Task<Void, Never>?
+
+
+        init(onReady: @escaping (String?) -> Void) {
+            self.onReady = onReady
+        }
+
+        func open(_ view: WKWebView) {
+            let request = URLRequest(url: LiveBrowser.homepage,
+                                     cachePolicy: .reloadIgnoringLocalCacheData,
+                                     timeoutInterval: 20)
+            view.load(request)
+            startup = Task { @MainActor [weak self, weak view] in
+                for _ in 0..<24 {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard !Task.isCancelled, let self, let view else { return }
+                    let script = """
+                        (() => {
+                            const root = document.querySelector('main#app');
+                            return !!root && !root.querySelector(':scope > .loading')
+                                && root.getBoundingClientRect().height > 0
+                                && root.innerText.trim().length > 0;
+                        })()
+                        """
+                    if (try? await view.evaluateJavaScript(script)) as? Bool == true {
+
+                        self.onReady(nil)
+                        return
+                    }
+                }
+                self?.fail("Каталог не загрузился за 24 секунды.")
+            }
+        }
+
+        private func fail(_ message: String) {
+            startup?.cancel()
+            onReady(message)
+        }
+
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
                      withError error: Error) {
-            guard (error as NSError).code != NSURLErrorCancelled else { return }
-            webView.loadHTMLString("""
-                <!doctype html><html lang="ru"><meta charset="utf-8">
-                <meta name="viewport" content="width=device-width,initial-scale=1">
-                <body style="background:#0c1211;color:#f2f6f3;font:17px system-ui;padding:32px">
-                <h1>Не удалось открыть Чепушка Live</h1>
-                <p>Проверьте подключение к интернету.</p>
-                <a style="color:#cafa75" href="https://live.chepushkavpn.fun/">Повторить</a>
-                </body></html>
-                """, baseURL: nil)
+            let code = (error as NSError).code
+            guard code != NSURLErrorCancelled else { return }
+            fail("Не удалось подключиться к Чепушка Live. Код ошибки: \(code).")
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                     withError error: Error) {
+            self.webView(webView, didFailProvisionalNavigation: navigation, withError: error)
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            fail("Страница закрылась из-за сбоя WebKit. Откройте её снова.")
         }
     }
 }
