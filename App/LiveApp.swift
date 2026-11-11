@@ -283,11 +283,137 @@ private struct ChannelScreen: View {
     }
 }
 
+private struct WatchComments: Decodable {
+    struct Entry: Decodable {
+        let name: String
+        let body: String
+    }
+    let items: [Entry]
+    let total: Int
+}
+
+private struct WatchSocial: Decodable { let likes: Int }
+
 private struct Watch: View {
     let video: Video
     var others: [Video] = []
     @AppStorage("savedVideos") private var saved = ""
-    @State private var liked = false
+    @AppStorage("followedChannels") private var followed = ""
+    @AppStorage("likedVideos") private var liked = ""
+    @AppStorage("dislikedVideos") private var disliked = ""
+    @State private var comments: WatchComments?
+    @State private var social: WatchSocial?
+    @State private var subscribers: Int?
+    @State private var commentsOpen = false
+    @State private var commentsFailed = false
+
+    private var hasLiked: Bool { contains(liked, video.id) }
+    private var hasDisliked: Bool { contains(disliked, video.id) }
+    private var isSaved: Bool { contains(saved, video.id) }
+
+    private func contains(_ list: String, _ id: String) -> Bool {
+        list.split(separator: ",").contains(Substring(id))
+    }
+
+    private func setting(_ list: String, _ id: String, enabled: Bool) -> String {
+        var ids = list.split(separator: ",").map(String.init).filter { $0 != id }
+        if enabled { ids.append(id) }
+        return ids.joined(separator: ",")
+    }
+
+    private func actionLabel(_ icon: String, _ title: String? = nil, selected: Bool = false) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 16))
+                .foregroundStyle(selected ? lime : .white)
+            if let title { Text(title).font(.caption.weight(.medium)).lineLimit(1) }
+        }
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .padding(.horizontal, 4)
+        .background(surface, in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 8) {
+            Button {
+                liked = setting(liked, video.id, enabled: !hasLiked)
+                disliked = setting(disliked, video.id, enabled: false)
+            } label: {
+                let count = (social?.likes ?? 0) + (hasLiked ? 1 : 0)
+                actionLabel(hasLiked ? "hand.thumbsup.fill" : "hand.thumbsup", count > 0 ? String(count) : nil, selected: hasLiked)
+            }.accessibilityLabel("Нравится")
+            Button {
+                disliked = setting(disliked, video.id, enabled: !hasDisliked)
+                liked = setting(liked, video.id, enabled: false)
+            } label: {
+                actionLabel(hasDisliked ? "hand.thumbsdown.fill" : "hand.thumbsdown", selected: hasDisliked)
+            }.accessibilityLabel("Не нравится")
+            ShareLink(item: origin.appendingPathComponent("watch").appendingPathComponent(video.id)) {
+                actionLabel("arrowshape.turn.up.right", "Поделиться").layoutPriority(1)
+            }.fixedSize(horizontal: true, vertical: false)
+            Button { saved = setting(saved, video.id, enabled: !isSaved) } label: {
+                actionLabel(isSaved ? "bookmark.fill" : "bookmark", selected: isSaved)
+            }.accessibilityLabel(isSaved ? "Убрать из избранного" : "В избранное")
+        }.buttonStyle(.plain)
+    }
+
+    private func authorRow(_ id: String) -> some View {
+        let subscribed = contains(followed, id)
+        return HStack(spacing: 10) {
+            NavigationLink(value: Route.channel(id)) {
+                HStack(spacing: 10) {
+                    Artwork(path: video.channel_avatar).frame(width: 40, height: 40).clipShape(Circle())
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(video.channel).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        if let subscribers {
+                            Text("\(subscribers) подписчиков").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }.buttonStyle(.plain)
+            Spacer(minLength: 0)
+            Button {
+                followed = setting(followed, id, enabled: !subscribed)
+            } label: {
+                Text(subscribed ? "Вы подписаны" : "Подписаться")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(subscribed ? lime : appBackground)
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 42)
+                    .background(subscribed ? surface : lime, in: RoundedRectangle(cornerRadius: 12))
+            }.buttonStyle(.plain)
+        }
+    }
+
+    private var commentsCard: some View {
+        Button { commentsOpen = true } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Комментарии").font(.subheadline.weight(.semibold))
+                    if let comments { Text(String(comments.total)).font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                }
+                if let first = comments?.items.first {
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(systemName: "person.crop.circle.fill").font(.title3).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(first.name).font(.caption2).foregroundStyle(.secondary)
+                            Text(first.body).font(.caption).lineLimit(2)
+                        }
+                    }
+                } else {
+                    Text(commentsFailed ? "Не удалось загрузить комментарии" : comments == nil ? "Загрузка…" : "Пока нет комментариев")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }.padding(14).background(surface, in: RoundedRectangle(cornerRadius: 16))
+        }.buttonStyle(.plain)
+    }
+
+    private func loadComments() async {
+        commentsFailed = false
+        do { comments = try await request("/api/media/" + video.id + "/comments") }
+        catch { commentsFailed = true }
+    }
     @State private var expandedDescription = false
     var body: some View {
         ScrollView {
@@ -308,32 +434,10 @@ private struct Watch: View {
                         }
                     }
                 }
-                if let id = video.channel_id {
-                    NavigationLink(value: Route.channel(id)) {
-                        HStack {
-                            Artwork(path: video.channel_avatar).frame(width: 40, height: 40).clipShape(Circle())
-                            Text(video.channel).font(.headline)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                        }
-                    }.buttonStyle(.plain)
-                }
-                HStack {
-                    Button { liked.toggle() } label: {
-                        Label("Нравится", systemImage: liked ? "hand.thumbsup.fill" : "hand.thumbsup")
-                    }
-                    ShareLink(item: origin.appendingPathComponent("watch").appendingPathComponent(video.id)) {
-                        Label("Поделиться", systemImage: "square.and.arrow.up")
-                    }
-                    Button {
-                        var ids = saved.split(separator: ",").map(String.init)
-                        if let index = ids.firstIndex(of: video.id) { ids.remove(at: index) }
-                        else { ids.append(video.id) }
-                        saved = ids.joined(separator: ",")
-                    } label: {
-                        Image(systemName: saved.split(separator: ",").contains(Substring(video.id)) ? "bookmark.fill" : "bookmark")
-                    }.accessibilityLabel("Сохранить")
-                }.buttonStyle(.bordered)
+                if let id = video.channel_id { authorRow(id) }
+                actionRow
+                Divider().padding(.top, 6)
+                commentsCard
                 if !others.isEmpty { Text("Далее").font(.headline) }
                 ForEach(others) { next in
                     NavigationLink(value: Route.video(next)) {
@@ -356,6 +460,40 @@ private struct Watch: View {
         .navigationTitle("Сейчас смотрите")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+        .task { await loadComments() }
+        .task { social = try? await request("/api/media/" + video.id + "/social") }
+        .task {
+            if let id = video.channel_id {
+                let channel: Channel? = try? await request("/api/channels/" + id)
+                subscribers = channel?.subscribers
+            }
+        }
+        .sheet(isPresented: $commentsOpen) {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if commentsFailed {
+                            Button("Повторить загрузку") { Task { await loadComments() } }
+                        } else if let comments {
+                            if comments.items.isEmpty { Text("Пока нет комментариев").foregroundStyle(.secondary) }
+                            ForEach(Array(comments.items.enumerated()), id: \.offset) { _, entry in
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(entry.name).font(.caption).foregroundStyle(.secondary)
+                                    Text(entry.body)
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                                Divider()
+                            }
+                        } else {
+                            ProgressView()
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
+                }
+                .background(appBackground.ignoresSafeArea())
+                .navigationTitle("Комментарии")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { commentsOpen = false } } }
+            }
+        }
     }
 }
 
@@ -422,4 +560,5 @@ private struct WebsitePlayer: UIViewRepresentable {
         }
     }
 }
+
 
