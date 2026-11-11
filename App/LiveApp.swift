@@ -3,6 +3,7 @@ import WebKit
 import CoreText
 import UniformTypeIdentifiers
 import PhotosUI
+import CoreTransferable
 
 private let appBackground = Color(red: 0.047, green: 0.071, blue: 0.067)
 private let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
@@ -859,17 +860,18 @@ private struct CreatorHome: View {
     @EnvironmentObject private var auth: LiveSession
     @State private var profile: Profile?
     @State private var videos: [Video] = []
-    private enum Modal: String, Identifiable {
-        case edit, publish
-        var id: String { rawValue }
-    }
-    @State private var modal: Modal?
+    @State private var subscribers: Int?
+    @State private var editing = false
+    @State private var publishing = false
     @State private var name = ""
     @State private var about = ""
     @State private var error = ""
     @State private var saving = false
 
     var body: some View {
+        if editing { editor } else { channelPage }
+    }
+    private var channelPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
@@ -881,7 +883,7 @@ private struct CreatorHome: View {
                             about = profile.about
                             error = ""
                             avatarSelection = nil
-                            modal = .edit
+                            editing = true
                         } label: { Label("Изменить", systemImage: "pencil").padding(.horizontal, 8).frame(minHeight: 44).contentShape(Rectangle()) }.buttonStyle(.plain).foregroundStyle(lime)
                     }
                 }
@@ -893,11 +895,12 @@ private struct CreatorHome: View {
                                 .clipShape(Circle()).offset(x: 14, y: 26)
                         }.padding(.bottom, 20)
                     Text(profile.name).font(.custom("DelaGothicOne-Regular", size: 23))
+                    if let subscribers { Text("\(subscribers) подписчиков · \(videos.count) видео").font(.caption).foregroundStyle(lime) }
                     if !profile.about.isEmpty { Text(profile.about).font(.subheadline).foregroundStyle(.secondary) }
-                    Button { modal = .publish } label: {
+                    Button { publishing = true } label: {
                         Label("Опубликовать видео", systemImage: "plus").frame(maxWidth: .infinity, minHeight: 36)
                     }.buttonStyle(.borderedProminent).foregroundStyle(appBackground)
-                    Text("Ваши видео").font(.headline)
+                    Text("Ваши видео").font(.custom("DelaGothicOne-Regular", size: 19))
                     if videos.isEmpty { Text("Опубликованных видео пока нет.").foregroundStyle(.secondary) }
                     ForEach(videos) { video in
                         NavigationLink(value: Route.video(video)) {
@@ -925,53 +928,70 @@ private struct CreatorHome: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
         }
         .task(id: auth.account?.name) { await load() }
-        .sheet(item: $modal) { screen in
-            if screen == .publish {
-                PublishVideo(channel: profile?.name ?? "")
-            } else {
-            NavigationStack {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        Artwork(path: profile?.avatar).frame(width: 92, height: 92).clipShape(Circle())
-                            .frame(maxWidth: .infinity)
-                        PhotosPicker(selection: $avatarSelection, matching: .images) {
-                            Label("Изменить фото", systemImage: "camera")
-                                .frame(maxWidth: .infinity)
-                        }.disabled(saving)
+        .fullScreenCover(isPresented: $publishing) {
+            PublishVideo(channel: profile?.name ?? "")
+        }
+    }
+
+    private var editor: some View {
+        VStack(spacing: 0) {
+            creatorHeader("Изменить канал", icon: "chevron.left", disabled: saving) { editing = false }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    PhotosPicker(selection: $avatarSelection, matching: .images) {
+                        VStack(spacing: 14) {
+                            Artwork(path: profile?.avatar).frame(width: 88, height: 88).clipShape(Circle())
+                                .overlay(alignment: .bottomTrailing) {
+                                    Image(systemName: "camera").font(.caption).padding(6)
+                                        .foregroundStyle(appBackground).background(lime, in: Circle())
+                                }
+                            Text("Изменить фото").font(.footnote.weight(.semibold)).foregroundStyle(lime)
+                            Text("Фото канала видно рядом с вашими видео").font(.caption2).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity)
+                    }.buttonStyle(.plain).disabled(saving).padding(.vertical, 20)
+                    VStack(alignment: .leading, spacing: 8) {
                         Text("Название канала").font(.caption).foregroundStyle(.secondary)
-                        TextField("Название", text: $name).textFieldStyle(.roundedBorder)
-                        Text("Описание").font(.caption).foregroundStyle(.secondary)
-                        TextEditor(text: $about).frame(minHeight: 120)
-                        if !error.isEmpty { Text(error).font(.caption) }
-                        Button {
-                            Task {
-                                saving = true
-                                defer { saving = false }
-                                do {
-                                    profile = try await request("/api/admin/channel/profile", method: "PUT",
-                                                                json: ["name": name, "about": about])
-                                    modal = nil
-                                } catch { self.error = error.localizedDescription }
-                            }
-                        } label: { Text("Сохранить").frame(maxWidth: .infinity) }
-                        .buttonStyle(.borderedProminent).disabled(saving)
-                    }.padding(16)
-                }.background(appBackground.ignoresSafeArea()).navigationTitle("Изменить канал")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { modal = nil }.disabled(saving) } }
-                    .task(id: avatarSelection) {
-                        guard let selection = avatarSelection else { return }
-                        saving = true
-                        defer { saving = false }
-                        do {
-                            let jpeg = try await jpegImage(selection, maximum: 512)
-                            profile = try await request("/api/admin/channel/avatar", method: "PUT", bytes: jpeg,
-                                                        headers: ["Content-Type": "image/jpeg"])
-                        } catch { self.error = error.localizedDescription }
+                        TextField("Название", text: $name).padding(14).creatorField()
                     }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Описание").font(.caption).foregroundStyle(.secondary)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            TextEditor(text: $about).scrollContentBackground(.hidden).frame(height: 86)
+                            Text("\(about.count) / 1000").font(.caption2).foregroundStyle(.secondary)
+                        }.padding(10).creatorField()
+                    }
+                    Text("Эти данные будут видны всем зрителям на странице вашего канала.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if !error.isEmpty { Text(error).font(.caption) }
+                }.padding(16)
             }
+            Divider()
+            creatorButton("Сохранить") { Task { await saveProfile() } }
+                .disabled(saving || !(2...80).contains(name.trimmingCharacters(in: .whitespacesAndNewlines).count) || about.count > 1000)
+                .padding(16)
         }
+        .background(appBackground)
+        .task(id: avatarSelection) {
+            guard let selection = avatarSelection else { return }
+            saving = true
+            defer { saving = false }
+            do {
+                let jpeg = try await jpegImage(selection, maximum: 512)
+                profile = try await request("/api/admin/channel/avatar", method: "PUT", bytes: jpeg,
+                                            headers: ["Content-Type": "image/jpeg"])
+            } catch { self.error = error.localizedDescription }
         }
+    }
+
+    private func saveProfile() async {
+        saving = true
+        error = ""
+        defer { saving = false }
+        do {
+            profile = try await request("/api/admin/channel/profile", method: "PUT",
+                                        json: ["name": name, "about": about])
+            editing = false
+        } catch { self.error = error.localizedDescription }
     }
 
     private func load() async {
@@ -983,17 +1003,22 @@ private struct CreatorHome: View {
             let owner: Profile = try await request("/api/admin/channel/profile")
             profile = owner
             auth.setOwnedChannel(owner.id)
-            if let channel: Channel = try? await request("/api/channels/" + owner.id) { videos = channel.videos }
+            if let channel: Channel = try? await request("/api/channels/" + owner.id) {
+                videos = channel.videos
+                subscribers = channel.subscribers
+            }
         } catch { self.error = error.localizedDescription }
     }
 }
 
 private struct PublishVideo: View {
     @State private var cover: PhotosPickerItem?
+    @State private var coverPreview: UIImage?
     struct Transfer: Decodable { let id: String; let offset, chunk_size: Int }
     let channel: String
     @Environment(\.dismiss) private var dismiss
-    @State private var choosing = false
+    @State private var selection: PhotosPickerItem?
+    @State private var importing = false
     @State private var file: URL?
     @State private var title = ""
     @State private var description = ""
@@ -1004,54 +1029,165 @@ private struct PublishVideo: View {
     @State private var submitted = false
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(file == nil ? "01 / ВЫБОР ВИДЕО" : "02 / ОФОРМЛЕНИЕ").font(.caption.bold()).foregroundStyle(lime)
-                    Divider()
-                    if let file {
-                        Label(file.lastPathComponent, systemImage: "doc").lineLimit(1)
-                        Text("Название видео").font(.caption)
-                        TextField("Название", text: $title).textFieldStyle(.roundedBorder)
-                        Text("Описание").font(.caption)
-                        TextEditor(text: $description).frame(minHeight: 96)
-                        PhotosPicker(selection: $cover, matching: .images) {
-                            Label(cover == nil ? "Загрузить обложку" : "Обложка выбрана", systemImage: "photo")
-                        }.disabled(busy || submitted)
-                        Label("Доступ для всех после модерации", systemImage: "globe")
-                        if busy { ProgressView(value: progress) }
-                        if !status.isEmpty { Text(status).font(.subheadline) }
-                        Button {
-                            if submitted { dismiss() }
-                            else { Task { await upload(file) } }
-                        } label: {
-                            Text(submitted ? "Готово" : "Отправить на модерацию").frame(maxWidth: .infinity)
-                        }.buttonStyle(.borderedProminent).disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    } else {
-                        Text("Поделитесь своей историей").font(.custom("DelaGothicOne-Regular", size: 25))
-                        Text("Выберите видео, затем добавьте название и описание.").foregroundStyle(.secondary)
-                        VStack(spacing: 16) {
-                            Image(systemName: "square.and.arrow.up").font(.largeTitle).foregroundStyle(lime)
-                            Text("Выберите видео").font(.headline)
-                            Button("Выбрать файл") { choosing = true }.buttonStyle(.borderedProminent)
-                        }.frame(maxWidth: .infinity).padding(32).background(surface, in: RoundedRectangle(cornerRadius: 18))
-                        Label("Публикация на канале «\(channel)»", systemImage: "person.crop.circle")
-                        if !status.isEmpty { Text(status) }
-                    }
-                }.padding(16)
-            }
-            .background(appBackground.ignoresSafeArea())
-            .navigationTitle("Новое видео").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() }.disabled(busy) } }
-            .fileImporter(isPresented: $choosing, allowedContentTypes: [.mpeg4Movie, .quickTimeMovie]) { result in
-                switch result {
-                case .success(let url):
-                    file = url
-                    title = String(url.deletingPathExtension().lastPathComponent.prefix(100))
-                case .failure(let error): status = error.localizedDescription
+        VStack(spacing: 0) {
+            creatorHeader("Новое видео", icon: file == nil ? "xmark" : "chevron.left", disabled: busy || importing) {
+                if file == nil || submitted { clearMovie(); dismiss() }
+                else {
+                    clearMovie()
+                    selection = nil
+                    transfer = nil
+                    progress = 0
+                    cover = nil
+                    status = ""
                 }
             }
-        }.interactiveDismissDisabled(busy)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(file == nil ? "01 / ВЫБОР ВИДЕО" : "02 / ОФОРМЛЕНИЕ")
+                        .font(.caption2.bold()).foregroundStyle(lime)
+                    HStack(spacing: 8) {
+                        Capsule().fill(lime).frame(height: 2)
+                        Capsule().fill(file == nil ? surface : lime).frame(height: 2)
+                    }
+                    if let file { details(file) } else { picker }
+                    if !status.isEmpty { Text(status).font(.caption) }
+                }.padding(16)
+            }
+            Divider()
+            if let file {
+                creatorButton(submitted ? "Готово" : "Опубликовать") {
+                    if submitted { clearMovie(); dismiss() } else { Task { await upload(file) } }
+                }.disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .padding(16)
+            } else {
+                VStack(spacing: 6) {
+                    Text("Далее — оформление видео").font(.subheadline)
+                    Text("Название, описание, обложка и доступ").font(.caption2)
+                }.foregroundStyle(.secondary).padding(16)
+            }
+        }
+        .background(appBackground.ignoresSafeArea())
+        .interactiveDismissDisabled(busy || importing)
+        .task(id: selection) {
+            guard let selection else { return }
+            importing = true
+            status = ""
+            defer { importing = false }
+            do {
+                guard let movie = try await selection.loadTransferable(type: GalleryVideo.self) else {
+                    throw URLError(.cannotDecodeContentData)
+                }
+                if Task.isCancelled {
+                    try? FileManager.default.removeItem(at: movie.url)
+                    return
+                }
+                file = movie.url
+                title = String(movie.url.deletingPathExtension().lastPathComponent.prefix(100))
+            } catch is CancellationError {} catch { status = "Не удалось загрузить видео из медиатеки. " + error.localizedDescription }
+        }
+    }
+
+    private var picker: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Поделитесь\nсвоей историей")
+                .font(.custom("DelaGothicOne-Regular", size: 25))
+            Text("Загрузите видео, а затем добавьте название, обложку и настройки.")
+                .font(.subheadline).foregroundStyle(.secondary)
+            VStack(spacing: 16) {
+                Image(systemName: "square.and.arrow.up").font(.title2).foregroundStyle(lime)
+                    .frame(width: 62, height: 62).background(lime.opacity(0.1), in: Circle())
+                Text("Выберите видео").font(.headline)
+                Text("MP4 или MOV · до 2 ГБ").font(.caption2).foregroundStyle(.secondary)
+                if importing { ProgressView("Загружаем из медиатеки…") }
+                else {
+                    PhotosPicker(selection: $selection, matching: .videos) {
+                        Label("Выбрать видео", systemImage: "photo.on.rectangle")
+                            .font(.subheadline.weight(.semibold)).padding(.horizontal, 22)
+                            .frame(height: 44).foregroundStyle(appBackground)
+                            .background(lime, in: RoundedRectangle(cornerRadius: 12))
+                    }.buttonStyle(.plain)
+                }
+            }.frame(maxWidth: .infinity).padding(.vertical, 26)
+                .background(creatorSurface, in: RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(lime.opacity(0.22), style: StrokeStyle(dash: [5, 5])))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Публикация на канале").font(.caption2).foregroundStyle(.secondary)
+                Text(channel).font(.subheadline.weight(.semibold))
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(14)
+                .background(creatorSurface, in: RoundedRectangle(cornerRadius: 12))
+            Label("Видео появится на канале после одобрения модератором.", systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func details(_ file: URL) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Image(systemName: "doc")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(file.lastPathComponent).lineLimit(1)
+                    Text(submitted ? "Отправлено на модерацию" : "Видео выбрано")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "checkmark").foregroundStyle(lime)
+            }.font(.subheadline).padding(12)
+                .background(creatorSurface, in: RoundedRectangle(cornerRadius: 10))
+            HStack {
+                Text("Название видео")
+                Spacer()
+                Text("\(title.count) / 100")
+            }.font(.caption).foregroundStyle(.secondary)
+            TextField("Название", text: $title).padding(12).creatorField()
+            Text("Описание").font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $description).scrollContentBackground(.hidden)
+                .frame(height: 65).padding(8).creatorField()
+            Text("Обложка видео").font(.caption).foregroundStyle(.secondary)
+            PhotosPicker(selection: $cover, matching: .images) {
+                HStack(spacing: 12) {
+                    Group {
+                        if let coverPreview { Image(uiImage: coverPreview).resizable().scaledToFill() }
+                        else { surface.overlay(Image(systemName: "photo")) }
+                    }.frame(width: 136, height: 76).clipShape(RoundedRectangle(cornerRadius: 9))
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(cover == nil ? "Загрузить обложку" : "Заменить обложку")
+                            .font(.caption.bold()).foregroundStyle(lime)
+                        Text("JPG или PNG · 16:9").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }.background(creatorSurface, in: RoundedRectangle(cornerRadius: 10))
+            }.buttonStyle(.plain).disabled(busy || submitted)
+            Text("Настройки публикации").font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                publicationRow("Доступ", icon: "globe", value: "Для всех")
+                Divider().padding(.leading, 34)
+                publicationRow("Комментарии", icon: "bubble", value: "Включены")
+                Divider().padding(.leading, 34)
+                publicationRow("Публикация", icon: "clock", value: "После модерации")
+            }.padding(.horizontal, 12).background(creatorSurface, in: RoundedRectangle(cornerRadius: 12))
+            if busy { ProgressView(value: progress) }
+        }
+        .disabled(submitted || busy)
+        .task(id: cover) {
+            coverPreview = nil
+            if let cover, let data = try? await cover.loadTransferable(type: Data.self), !Task.isCancelled {
+                coverPreview = UIImage(data: data)
+            }
+        }
+    }
+
+    private func publicationRow(_ title: String, icon: String, value: String) -> some View {
+        HStack {
+            Image(systemName: icon).frame(width: 20)
+            Text(title)
+            Spacer()
+            Text(value).foregroundStyle(.secondary)
+        }.font(.subheadline).frame(minHeight: 45)
+    }
+
+    private func clearMovie() {
+        if let file { try? FileManager.default.removeItem(at: file) }
+        file = nil
     }
 
     private func upload(_ file: URL) async {
@@ -1117,4 +1253,48 @@ private func jpegImage(_ selection: PhotosPickerItem, maximum: CGFloat) async th
 }
 
 
+
+
+
+private let creatorSurface = Color(red: 0.071, green: 0.114, blue: 0.102)
+
+private extension View {
+    func creatorField() -> some View {
+        background(creatorSurface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(surface))
+    }
+}
+
+private func creatorHeader(_ title: String, icon: String, disabled: Bool, close: @escaping () -> Void) -> some View {
+    HStack(spacing: 2) {
+        Button(action: close) {
+            Image(systemName: icon).frame(width: 44, height: 48).contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(disabled).accessibilityLabel("Назад")
+        Text(title).font(.subheadline.weight(.semibold))
+        Spacer()
+    }.padding(.trailing, 16)
+}
+
+private func creatorButton(_ title: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+        Text(title).font(.subheadline.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 47)
+            .foregroundStyle(appBackground)
+            .background(lime, in: RoundedRectangle(cornerRadius: 12))
+    }.buttonStyle(.plain)
+}
+
+private struct GalleryVideo: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let copy = folder.appendingPathComponent(received.file.lastPathComponent)
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return Self(url: copy)
+        }
+    }
+}
 
