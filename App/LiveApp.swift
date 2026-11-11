@@ -1,5 +1,6 @@
 import SwiftUI
-import AVKit
+import WebKit
+import CoreText
 
 private let appBackground = Color(red: 0.047, green: 0.071, blue: 0.067)
 private let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
@@ -47,6 +48,11 @@ private func clock(_ seconds: Double) -> String {
 
 @main
 struct ChepushkaLiveApp: App {
+    init() {
+        if let font = Bundle.main.url(forResource: "DelaGothicOne-Regular", withExtension: "ttf", subdirectory: "Player") {
+            CTFontManagerRegisterFontsForURL(font as CFURL, .process, nil)
+        }
+    }
     var body: some Scene {
         WindowGroup { Home().preferredColorScheme(.dark).tint(lime) }
     }
@@ -105,7 +111,7 @@ private struct Home: View {
                 HStack {
                     Text("C").font(.title3.bold()).foregroundStyle(appBackground)
                         .frame(width: 34, height: 34).background(lime, in: Circle())
-                    Text("Чепушка Live").font(.headline.weight(.black))
+                    Text("Чепушка Live").font(.custom("DelaGothicOne-Regular", size: 17))
                     Spacer()
                     Button { search.toggle(); if !search { query = "" } } label: {
                         Image(systemName: "magnifyingglass").frame(width: 44, height: 44)
@@ -131,7 +137,7 @@ private struct Home: View {
                             }
                         }
                         Text(tab == "Главная" ? "Для вас" : tab == "Профиль" ? "Сохранённое" : tab)
-                            .font(.title2.weight(.black))
+                            .font(.custom("DelaGothicOne-Regular", size: 23))
                         if failure {
                             Button("Не удалось загрузить каталог. Повторить") { Task { await load() } }
                         } else if visible.isEmpty {
@@ -220,7 +226,7 @@ private struct ChannelScreen: View {
                             Artwork(path: channel.profile.avatar).frame(width: 64, height: 64)
                                 .clipShape(Circle()).offset(x: 14, y: 30)
                         }.padding(.bottom, 28)
-                    Text(channel.profile.name).font(.title.weight(.black))
+                    Text(channel.profile.name).font(.custom("DelaGothicOne-Regular", size: 24))
                     Text("\(channel.subscribers) подписчиков · \(channel.videos.count) видео")
                         .font(.subheadline).foregroundStyle(lime)
                     if let text = channel.profile.about, !text.isEmpty {
@@ -282,13 +288,26 @@ private struct Watch: View {
     var others: [Video] = []
     @AppStorage("savedVideos") private var saved = ""
     @State private var liked = false
+    @State private var expandedDescription = false
     var body: some View {
         ScrollView {
-            LocalPlayer(video: video)
+            WebsitePlayer(video: video).aspectRatio(16 / 9, contentMode: .fit)
             VStack(alignment: .leading, spacing: 14) {
                 Text(video.title).font(.title2.bold())
                 Text(video.live ? "Прямой эфир" : "\(video.views ?? 0) просмотров").font(.caption).foregroundStyle(.secondary)
-                if let description = video.description { Text(description).font(.subheadline).foregroundStyle(.secondary) }
+                if let description = video.description, !description.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(description)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(expandedDescription ? nil : 2)
+                        if description.count > 56 || description.contains("\n") {
+                            Button(expandedDescription ? "Свернуть" : "Ещё") {
+                                expandedDescription.toggle()
+                            }.font(.subheadline.weight(.semibold))
+                        }
+                    }
+                }
                 if let id = video.channel_id {
                     NavigationLink(value: Route.channel(id)) {
                         HStack {
@@ -317,7 +336,19 @@ private struct Watch: View {
                 }.buttonStyle(.bordered)
                 if !others.isEmpty { Text("Далее").font(.headline) }
                 ForEach(others) { next in
-                    NavigationLink(value: Route.video(next)) { FeedCard(video: next) }.buttonStyle(.plain)
+                    NavigationLink(value: Route.video(next)) {
+                        HStack(alignment: .top, spacing: 12) {
+                            Artwork(path: next.poster)
+                                .frame(width: 132, height: 74)
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(next.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                                Text(next.channel).font(.caption).foregroundStyle(.secondary)
+                                Text("\(next.views ?? 0) просмотров").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }.buttonStyle(.plain)
                 }
             }.padding(16)
         }
@@ -328,141 +359,67 @@ private struct Watch: View {
     }
 }
 
-private struct PlayerSurface: UIViewRepresentable {
-    let player: AVPlayer
-    final class Surface: UIView {
-        override class var layerClass: AnyClass { AVPlayerLayer.self }
-    }
-    func makeUIView(context: Context) -> Surface {
-        let view = Surface()
-        view.backgroundColor = .black
-        (view.layer as? AVPlayerLayer)?.player = player
-        return view
-    }
-    func updateUIView(_ view: Surface, context: Context) {
-        (view.layer as? AVPlayerLayer)?.player = player
-    }
-}
 
-private struct LocalPlayer: View {
+private struct WebsitePlayer: UIViewRepresentable {
     let video: Video
-    @State private var player = AVPlayer()
-    @State private var started = false
-    @State private var playing = false
-    @State private var muted = false
-    @State private var position = 0.0
-    @State private var editing = false
-    @State private var full = false
-    @State private var quality = "auto"
-    @State private var error = false
-    private let ticker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
-    var body: some View {
-        controls.aspectRatio(16 / 9, contentMode: .fit)
-            .fullScreenCover(isPresented: $full) {
-                controls.frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black.ignoresSafeArea())
-            }
-            .onReceive(ticker) { _ in
-                if !editing {
-                    let time = player.currentTime().seconds
-                    if time.isFinite { position = min(max(time, 0), max(video.duration ?? 0, 1)) }
-                }
-                if player.currentItem?.status == .failed { error = true; playing = false }
-                if !video.live, let duration = video.duration, duration > 0,
-                   position >= duration - 0.25, player.timeControlStatus == .paused {
-                    playing = false
-                }
-            }
-            .onDisappear { if !full { player.pause(); playing = false } }
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(video: video) }
 
-    private var controls: some View {
-        ZStack {
-            if started { PlayerSurface(player: player) }
-            else { Artwork(path: video.poster) }
-            if playing && player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
-                ProgressView().offset(y: -42)
-            }
-            if error {
-                Button("Повторить загрузку") { load(autoplay: true) }
-                    .buttonStyle(.borderedProminent)
-            } else {
-                HStack(spacing: 22) {
-                    if !video.live { control("gobackward.10", "Назад на 10 секунд") { seek(position - 10) } }
-                    control(playing ? "pause.fill" : "play.fill", playing ? "Пауза" : "Смотреть") {
-                        if !started { load(autoplay: true) }
-                        else if playing { player.pause(); playing = false }
-                        else { player.play(); playing = true }
-                    }
-                    if !video.live { control("goforward.10", "Вперёд на 10 секунд") { seek(position + 10) } }
-                }
-            }
-            VStack {
-                Spacer()
-                HStack {
-                    Text(video.live ? "Прямой эфир" : "\(clock(position)) / \(clock(video.duration ?? 0))")
-                        .font(.caption.monospacedDigit())
-                    Spacer()
-                    Button {
-                        muted.toggle()
-                        player.isMuted = muted
-                    } label: {
-                        Image(systemName: muted ? "speaker.slash" : "speaker.wave.2")
-                    }.accessibilityLabel("Звук")
-                    Menu {
-                        Button("Авто") { selectQuality("auto") }
-                        ForEach((video.qualities ?? []).sorted { $0.height > $1.height }, id: \.code) { option in
-                            Button("\(option.height)p") { selectQuality(option.code) }
-                        }
-                    } label: {
-                        Text(quality == "auto" ? "Авто" : "\(video.qualities?.first { $0.code == quality }?.height ?? 0)p")
-                    }.accessibilityLabel("Качество")
-                    Button { full.toggle() } label: {
-                        Image(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                    }.accessibilityLabel(full ? "Закрыть полный экран" : "Полный экран")
-                }.padding(.bottom, 5)
-                if !video.live, let duration = video.duration, duration > 0 {
-                    Slider(value: $position, in: 0...duration) { active in
-                        editing = active
-                        if !active { seek(position) }
-                    }.accessibilityLabel("Позиция видео")
-                }
-            }.padding(12).background(alignment: .bottom) {
-                LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .center, endPoint: .bottom)
-            }
-        }.foregroundStyle(.white).background(.black)
-    }
-
-    private func control(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon).frame(width: 48, height: 48).background(.black.opacity(0.62), in: Circle())
-        }.accessibilityLabel(label)
-    }
-
-    private func selectQuality(_ value: String) {
-        quality = value
-        if started { load(autoplay: playing) }
-    }
-
-    private func load(autoplay: Bool) {
-        guard let url = remote(video.manifest), var parts = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
-            error = true
-            return
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.allowsAirPlayForMediaPlayback = true
+        config.allowsPictureInPictureMediaPlayback = true
+        if #available(iOS 16.0, *) {
+            config.preferences.isElementFullscreenEnabled = true
         }
-        parts.queryItems = (parts.queryItems ?? []).filter { $0.name != "quality" } + [URLQueryItem(name: "quality", value: quality)]
-        guard let source = parts.url else { error = true; return }
-        error = false
-        started = true
-        player.replaceCurrentItem(with: AVPlayerItem(url: source))
-        if !video.live && position > 0 { seek(position) }
-        playing = autoplay
-        if autoplay { player.play() }
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        if let page = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "Player") {
+            webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
+        } else {
+            webView.loadHTMLString("<p>Не удалось загрузить плеер.</p>", baseURL: nil)
+        }
+        return webView
     }
 
-    private func seek(_ time: Double) {
-        position = min(max(time, 0), video.duration ?? 0)
-        if started { player.seek(to: CMTime(seconds: position, preferredTimescale: 600)) }
+    func updateUIView(_ webView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.evaluateJavaScript("window.activePlayer?.destroy()", completionHandler: nil)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        let video: Video
+
+        init(video: Video) { self.video = video }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard webView.url?.isFileURL == true else { return }
+            guard let manifest = remote(video.manifest) else {
+                webView.evaluateJavaScript("document.getElementById('player').textContent='Видео пока недоступно';document.body.style.color='white';", completionHandler: nil)
+                return
+            }
+            let item: [String: Any] = [
+                "id": video.id,
+                "manifest": manifest.absoluteString,
+                "poster": remote(video.poster)?.absoluteString ?? "",
+                "origin": "https://live.chepushkavpn.fun",
+                "live": video.live,
+                "duration": video.duration ?? 0,
+                "qualities": (video.qualities ?? []).map { ["code": $0.code, "height": $0.height] as [String: Any] }
+            ]
+            webView.callAsyncJavaScript("window.mountBundledPlayer(item)", arguments: ["item": item],
+                                        in: nil, in: .page) { result in
+                if case .failure = result {
+                    webView.evaluateJavaScript("document.getElementById('player').textContent='Не удалось запустить плеер';document.body.style.color='white';", completionHandler: nil)
+                }
+            }
+        }
     }
 }
 
