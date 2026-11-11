@@ -368,6 +368,10 @@ private struct WatchComments: Decodable {
 
 
 private struct Watch: View {
+    private struct Likes: Decodable {
+        let liked: Bool
+        let likes: Int
+    }
     @EnvironmentObject private var auth: LiveSession
     @State private var draft = ""
     @State private var commentError = ""
@@ -376,8 +380,10 @@ private struct Watch: View {
     var others: [Video] = []
     @AppStorage("savedVideos") private var saved = ""
     @AppStorage("followedChannels") private var followed = ""
-    @AppStorage("likedVideos") private var liked = ""
     @AppStorage("dislikedVideos") private var disliked = ""
+    @State private var likes: Likes?
+    @State private var changingLike = false
+    @State private var likeError = ""
     @State private var comments: WatchComments?
     @State private var commentToDelete: WatchComments.Entry?
     @State private var deletingComment = false
@@ -386,8 +392,8 @@ private struct Watch: View {
     @State private var commentsOpen = false
     @State private var commentsFailed = false
 
-    private var hasLiked: Bool { contains(liked, video.id) }
-    private var hasDisliked: Bool { contains(disliked, video.id) }
+    private var hasLiked: Bool { likes?.liked == true }
+    private var hasDisliked: Bool { !hasLiked && contains(disliked, video.id) }
     private var isSaved: Bool { contains(saved, video.id) }
 
     private func contains(_ list: String, _ id: String) -> Bool {
@@ -400,29 +406,55 @@ private struct Watch: View {
         return ids.joined(separator: ",")
     }
 
-    private func actionLabel(_ icon: String, selected: Bool = false) -> some View {
-        Image(systemName: icon).font(.system(size: 20))
+    private func actionLabel(_ icon: String, selected: Bool = false, count: Int? = nil) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 20))
+            if let count { Text(count.formatted()).font(.caption.monospacedDigit()) }
+        }
             .foregroundStyle(selected ? lime : .white)
             .frame(maxWidth: .infinity, minHeight: 44)
             .contentShape(Rectangle())
+    }
+
+    private func loadLikes() async {
+        let response: Likes? = try? await request("/api/media/" + video.id + "/social")
+        if !Task.isCancelled && !changingLike, let response { likes = response }
+    }
+
+    private func changeLike(dislike: Bool = false) async {
+        guard !changingLike else { return }
+        changingLike = true
+        likeError = ""
+        defer { changingLike = false }
+        do {
+            let route = "/api/media/" + video.id
+            let current: Likes = try await request(route + "/social")
+            let wasDisliked = !current.liked && contains(disliked, video.id)
+            if !dislike || current.liked {
+                likes = try await request(route + "/like", method: "POST", json: [:])
+            } else { likes = current }
+            disliked = setting(disliked, video.id, enabled: dislike && !wasDisliked)
+        } catch {
+            likeError = error.localizedDescription
+        }
     }
 
     private var actionRow: some View {
         HStack(spacing: 8) {
             Button {
                 guard auth.requireLogin() else { return }
-                liked = setting(liked, video.id, enabled: !hasLiked)
-                disliked = setting(disliked, video.id, enabled: false)
+                Task { await changeLike() }
             } label: {
-                actionLabel(hasLiked ? "hand.thumbsup.fill" : "hand.thumbsup", selected: hasLiked)
-            }.accessibilityLabel("Нравится")
+                actionLabel(hasLiked ? "hand.thumbsup.fill" : "hand.thumbsup", selected: hasLiked, count: likes?.likes)
+            }.accessibilityLabel(hasLiked ? "Убрать лайк" : "Нравится")
+                .accessibilityValue(likes.map { String($0.likes) } ?? "")
+                .disabled(changingLike)
             Button {
                 guard auth.requireLogin() else { return }
-                disliked = setting(disliked, video.id, enabled: !hasDisliked)
-                liked = setting(liked, video.id, enabled: false)
+                Task { await changeLike(dislike: true) }
             } label: {
                 actionLabel(hasDisliked ? "hand.thumbsdown.fill" : "hand.thumbsdown", selected: hasDisliked)
-            }.accessibilityLabel("Не нравится")
+            }.accessibilityLabel("Не нравится").disabled(changingLike)
             ShareLink(item: origin.appendingPathComponent("watch").appendingPathComponent(video.id)) {
                 actionLabel("arrowshape.turn.up.right")
             }.accessibilityLabel("Поделиться")
@@ -543,6 +575,7 @@ private struct Watch: View {
                 }
                 if let id = video.channel_id { authorRow(id) }
                 actionRow
+                if !likeError.isEmpty { Text(likeError).font(.caption).foregroundStyle(.secondary) }
                 Divider().padding(.top, 6)
                 commentsCard
                 if !others.isEmpty { Text("Далее").font(.headline) }
@@ -568,6 +601,7 @@ private struct Watch: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .task { await loadComments() }
+        .task(id: auth.account?.name) { await loadLikes() }
         .task {
             if let id = video.channel_id {
                 let channel: Channel? = try? await request("/api/channels/" + id)
