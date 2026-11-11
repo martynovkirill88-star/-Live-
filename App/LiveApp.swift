@@ -576,15 +576,13 @@ private struct WebsitePlayer: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(video: video) }
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> UIView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.allowsAirPlayForMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = false
         config.userContentController.add(context.coordinator, name: "playerOrientation")
-        if #available(iOS 16.0, *) {
-            config.preferences.isElementFullscreenEnabled = true
-        }
+
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.isOpaque = false
@@ -596,23 +594,73 @@ private struct WebsitePlayer: UIViewRepresentable {
         } else {
             webView.loadHTMLString("<p>Не удалось загрузить плеер.</p>", baseURL: nil)
         }
-        return webView
+        let host = UIView()
+        host.backgroundColor = .black
+        context.coordinator.host = host
+        context.coordinator.player = webView
+        context.coordinator.attachPlayer(to: host)
+        return host
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {}
+    func updateUIView(_ host: UIView, context: Context) {}
 
-    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
-        webView.evaluateJavaScript("window.activePlayer?.destroy()", completionHandler: nil)
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "playerOrientation")
-        if coordinator.landscape { OrientationDelegate.rotate(false) }
+    static func dismantleUIView(_ host: UIView, coordinator: Coordinator) {
+        coordinator.closeFullscreen()
+        coordinator.player?.evaluateJavaScript("window.activePlayer?.destroy()", completionHandler: nil)
+        coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerOrientation")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        var landscape = false
+        weak var host: UIView?
+        weak var player: WKWebView?
+        private weak var fullscreen: UIViewController?
+
+        func attachPlayer(to container: UIView) {
+            guard let player else { return }
+            player.removeFromSuperview()
+            player.translatesAutoresizingMaskIntoConstraints = true
+            player.frame = container.bounds
+            player.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            container.addSubview(player)
+        }
+
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.frameInfo.isMainFrame, let active = message.body as? Bool else { return }
-            landscape = active
-            OrientationDelegate.rotate(active)
+            guard message.frameInfo.isMainFrame else { return }
+            if fullscreen != nil { closeFullscreen(); return }
+            guard let presenter = host?.window?.rootViewController else { return }
+            var top = presenter
+            while let presented = top.presentedViewController { top = presented }
+            let screen = UIViewController()
+            screen.view.backgroundColor = .black
+            screen.modalPresentationStyle = .fullScreen
+            screen.modalPresentationCapturesStatusBarAppearance = true
+            let close = UIButton(type: .system)
+            close.setImage(UIImage(systemName: "xmark"), for: .normal)
+            close.tintColor = .white
+            close.backgroundColor = UIColor(white: 0.1, alpha: 0.85)
+            close.layer.cornerRadius = 14
+            close.accessibilityLabel = "Закрыть полноэкранный режим"
+            close.addAction(UIAction { [weak self] _ in self?.closeFullscreen() }, for: .touchUpInside)
+            close.translatesAutoresizingMaskIntoConstraints = false
+            fullscreen = screen
+            attachPlayer(to: screen.view)
+            screen.view.addSubview(close)
+            NSLayoutConstraint.activate([
+                close.leadingAnchor.constraint(equalTo: screen.view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+                close.topAnchor.constraint(equalTo: screen.view.safeAreaLayoutGuide.topAnchor, constant: 12),
+                close.widthAnchor.constraint(equalToConstant: 48),
+                close.heightAnchor.constraint(equalToConstant: 44)
+            ])
+            player?.evaluateJavaScript("document.body.classList.add('app-fullscreen')", completionHandler: nil)
+            top.present(screen, animated: false) { OrientationDelegate.rotate(true) }
+        }
+
+        func closeFullscreen() {
+            guard let screen = fullscreen else { return }
+            fullscreen = nil
+            if let host { attachPlayer(to: host) }
+            player?.evaluateJavaScript("document.body.classList.remove('app-fullscreen')", completionHandler: nil)
+            screen.dismiss(animated: false) { OrientationDelegate.rotate(false) }
         }
         let video: Video
 
@@ -1033,4 +1081,5 @@ private func jpegImage(_ selection: PhotosPickerItem, maximum: CGFloat) async th
         source.draw(in: CGRect(origin: .zero, size: size))
     }
 }
+
 
