@@ -17,7 +17,7 @@ private struct Video: Decodable, Identifiable, Hashable {
     }
     let id, title, channel: String
     let channel_id, channel_avatar, poster, manifest, description: String?
-    let status, moderation, publication_policy: String?
+    let status, moderation, publication_policy, moderation_note: String?
     let published: Bool?
     let publish_at: Double?
     let duration: Double?
@@ -177,7 +177,9 @@ private struct Home: View {
                             Text(videos.isEmpty ? "Загружаем каталог…" : "Здесь пока нет видео").foregroundStyle(.secondary)
                         }
                         ForEach(visible) { video in
-                            NavigationLink(value: Route.video(video)) { FeedCard(video: video) }
+                            Button { path.append(.video(video)) } label: {
+                                FeedCard(video: video).contentShape(Rectangle())
+                            }
                                 .buttonStyle(.plain)
                         }
                     }.padding(16)
@@ -323,7 +325,9 @@ private struct ChannelScreen: View {
 }
 
 private struct WatchComments: Decodable {
-    struct Entry: Decodable {
+    struct Entry: Decodable, Identifiable {
+        let id: Int
+        let can_delete: Bool?
         let name: String
         let body: String
     }
@@ -345,6 +349,8 @@ private struct Watch: View {
     @AppStorage("likedVideos") private var liked = ""
     @AppStorage("dislikedVideos") private var disliked = ""
     @State private var comments: WatchComments?
+    @State private var commentToDelete: WatchComments.Entry?
+    @State private var deletingComment = false
     @State private var subscribers: Int?
     @State private var authorIsOwner: Bool?
     @State private var commentsOpen = false
@@ -465,6 +471,21 @@ private struct Watch: View {
         } catch { commentError = error.localizedDescription }
     }
 
+    private func deleteComment(_ entry: WatchComments.Entry) async {
+        guard !deletingComment else { return }
+        deletingComment = true
+        commentError = ""
+        defer { deletingComment = false }
+        do {
+            let _: WriteResult = try await request("/api/media/" + video.id + "/comments/" + String(entry.id), method: "DELETE")
+            if let current = comments {
+                comments = WatchComments(items: current.items.filter { $0.id != entry.id },
+                                         total: max(0, current.total - 1), enabled: current.enabled)
+            }
+            await loadComments()
+        } catch { commentError = error.localizedDescription }
+    }
+
     private func loadComments() async {
         commentsFailed = false
         do { comments = try await request("/api/media/" + video.id + "/comments") }
@@ -534,11 +555,19 @@ private struct Watch: View {
                             Button("Повторить загрузку") { Task { await loadComments() } }
                         } else if let comments {
                             if comments.items.isEmpty { Text("Пока нет комментариев").foregroundStyle(.secondary) }
-                            ForEach(Array(comments.items.enumerated()), id: \.offset) { _, entry in
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(entry.name).font(.caption).foregroundStyle(.secondary)
-                                    Text(entry.body)
-                                }.frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach(comments.items) { entry in
+                                HStack(alignment: .top, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(entry.name).font(.caption).foregroundStyle(.secondary)
+                                        Text(entry.body)
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                    if entry.can_delete == true {
+                                        Button(role: .destructive) { commentToDelete = entry } label: {
+                                            Image(systemName: "trash").frame(width: 44, height: 44).contentShape(Rectangle())
+                                        }.buttonStyle(.plain).disabled(deletingComment)
+                                            .accessibilityLabel("Удалить свой комментарий")
+                                    }
+                                }
                                 Divider()
                             }
                         } else {
@@ -569,6 +598,12 @@ private struct Watch: View {
                             }
                         }
                     }.padding(12).background(surface)
+                }
+                .confirmationDialog("Удалить комментарий?", isPresented: Binding(
+                    get: { commentToDelete != nil },
+                    set: { if !$0 { commentToDelete = nil } }
+                ), titleVisibility: .visible, presenting: commentToDelete) { entry in
+                    Button("Удалить", role: .destructive) { Task { await deleteComment(entry) } }
                 }
                 .navigationTitle("Комментарии")
                 .navigationBarTitleDisplayMode(.inline)
@@ -877,6 +912,7 @@ private struct CreatorHome: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var editingVideo: Video?
     @State private var deletingVideo: Video?
+    @State private var rejectedVideo: Video?
     @State private var managementError = ""
     @State private var avatarSelection: PhotosPickerItem?
     struct Profile: Decodable {
@@ -930,17 +966,15 @@ private struct CreatorHome: View {
                     if videos.isEmpty { Text("На канале пока нет видео.").foregroundStyle(.secondary) }
                     ForEach(videos) { video in
                         HStack(spacing: 10) {
-                            NavigationLink(value: Route.video(video)) {
-                                HStack(spacing: 10) {
-                                    Artwork(path: video.poster).frame(width: 108, height: 61)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    VStack(alignment: .leading) {
-                                        Text(video.title).lineLimit(2)
-                                        Text(publicationStatus(video)).font(.caption).foregroundStyle(lime)
-                                    }
-                                    Spacer(minLength: 0)
-                                }
-                            }.buttonStyle(.plain).disabled(video.status != "ready" && video.status != "live")
+                            if video.moderation == "rejected" {
+                                Button { rejectedVideo = video } label: {
+                                    ownerVideoRow(video)
+                                }.buttonStyle(.plain)
+                            } else {
+                                NavigationLink(value: Route.video(video)) {
+                                    ownerVideoRow(video)
+                                }.buttonStyle(.plain).disabled(video.status != "ready" && video.status != "live")
+                            }
                             if !video.live && video.status != "scheduled" && video.status != "starting" {
                                 Menu {
                                     Button { editingVideo = video } label: { Label("Изменить видео", systemImage: "pencil") }
@@ -986,6 +1020,15 @@ private struct CreatorHome: View {
             Button("Удалить", role: .destructive) { Task { await removeVideo(video) } }
         } message: { video in
             Text("«\(video.title)» будет удалено без возможности восстановления.")
+        }
+        .alert("Видео отклонено", isPresented: Binding(
+            get: { rejectedVideo != nil },
+            set: { if !$0 { rejectedVideo = nil } }
+        ), presenting: rejectedVideo) { _ in
+            Button("Понятно", role: .cancel) {}
+        } message: { video in
+            let reason = video.moderation_note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            Text(reason.isEmpty ? "Модератор не указал причину." : reason)
         }
         .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await refreshVideos() } }) {
             PublishVideo(channel: profile?.name ?? "")
@@ -1053,6 +1096,21 @@ private struct CreatorHome: View {
         } catch { self.error = error.localizedDescription }
     }
 
+    private func ownerVideoRow(_ video: Video) -> some View {
+        HStack(spacing: 10) {
+            Artwork(path: video.poster).frame(width: 108, height: 61)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading) {
+                Text(video.title).lineLimit(2)
+                Text(publicationStatus(video)).font(.caption)
+                    .foregroundStyle(video.moderation == "rejected" ? Color.orange : lime)
+            }
+            Spacer(minLength: 0)
+            if video.moderation == "rejected" {
+                Image(systemName: "info.circle").foregroundStyle(.secondary)
+            }
+        }.contentShape(Rectangle())
+    }
     private func publicationStatus(_ video: Video) -> String {
         if video.status == "error" { return "Ошибка обработки" }
         if video.status == "queued" || video.status == "processing" { return "Обрабатывается" }
@@ -1489,6 +1547,8 @@ private struct GalleryVideo: Transferable {
         }
     }
 }
+
+
 
 
 
