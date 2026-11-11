@@ -23,6 +23,7 @@ private struct Video: Decodable, Identifiable, Hashable {
 }
 private struct Catalog: Decodable { let items: [Video] }
 private struct Channel: Decodable {
+    let is_owner: Bool?
     struct Profile: Decodable { let name: String; let avatar, about: String? }
     let profile: Profile
     let subscribers: Int
@@ -261,17 +262,19 @@ private struct ChannelScreen: View {
                     if let text = channel.profile.about, !text.isEmpty {
                         Text(text).foregroundStyle(.secondary).font(.subheadline)
                     }
-                    HStack {
-                        Button(subscribed ? "✓  Вы подписаны" : "Подписаться") {
-                            guard auth.requireLogin() else { return }
-                            if !subscribed { followed = (followed.isEmpty ? "" : followed + ",") + id }
-                        }.buttonStyle(.borderedProminent).tint(subscribed ? surface : lime)
-                            .foregroundStyle(subscribed ? lime : appBackground)
-                        if subscribed {
-                            Button("Отписаться") {
-                                guard auth.requireLogin() else { return }
-                                followed = followed.split(separator: ",").filter { $0 != Substring(id) }.joined(separator: ",")
-                            }.buttonStyle(.bordered)
+                    if channel.is_owner != true && auth.ownedChannelID != id {
+                        HStack {
+                            Button(subscribed ? "✓  Вы подписаны" : "Подписаться") {
+                                guard auth.requireLogin(), auth.ownedChannelID != id, channel.is_owner != true else { return }
+                                if !subscribed { followed = (followed.isEmpty ? "" : followed + ",") + id }
+                            }.buttonStyle(.borderedProminent).tint(subscribed ? surface : lime)
+                                .foregroundStyle(subscribed ? lime : appBackground)
+                            if subscribed {
+                                Button("Отписаться") {
+                                    guard auth.requireLogin(), auth.ownedChannelID != id, channel.is_owner != true else { return }
+                                    followed = followed.split(separator: ",").filter { $0 != Substring(id) }.joined(separator: ",")
+                                }.buttonStyle(.bordered)
+                            }
                         }
                     }
                     HStack(spacing: 24) {
@@ -339,6 +342,7 @@ private struct Watch: View {
     @State private var comments: WatchComments?
     @State private var social: WatchSocial?
     @State private var subscribers: Int?
+    @State private var authorIsOwner: Bool?
     @State private var commentsOpen = false
     @State private var commentsFailed = false
 
@@ -408,17 +412,19 @@ private struct Watch: View {
                 }
             }.buttonStyle(.plain)
             Spacer(minLength: 0)
-            Button {
-                guard auth.requireLogin() else { return }
-                followed = setting(followed, id, enabled: !subscribed)
-            } label: {
-                Text(subscribed ? "Вы подписаны" : "Подписаться")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(subscribed ? lime : appBackground)
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 42)
-                    .background(subscribed ? surface : lime, in: RoundedRectangle(cornerRadius: 12))
-            }.buttonStyle(.plain)
+            if auth.ownedChannelID != id && (auth.account?.can_publish != true || authorIsOwner == false) {
+                Button {
+                    guard auth.requireLogin(), auth.ownedChannelID != id, authorIsOwner == false else { return }
+                    followed = setting(followed, id, enabled: !subscribed)
+                } label: {
+                    Text(subscribed ? "Вы подписаны" : "Подписаться")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(subscribed ? lime : appBackground)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 42)
+                        .background(subscribed ? surface : lime, in: RoundedRectangle(cornerRadius: 12))
+                }.buttonStyle(.plain)
+            }
         }
     }
 
@@ -517,6 +523,8 @@ private struct Watch: View {
             if let id = video.channel_id {
                 let channel: Channel? = try? await request("/api/channels/" + id)
                 subscribers = channel?.subscribers
+                authorIsOwner = channel?.is_owner
+                if channel?.is_owner == true { auth.setOwnedChannel(id) }
             }
         }
         .sheet(isPresented: $commentsOpen) {
@@ -720,8 +728,25 @@ private final class LiveSession: ObservableObject {
     struct Response: Decodable { let account: Account? }
     @Published var account: Account?
     @Published var showLogin = false
+    @Published private(set) var ownedChannelID: String?
+    private struct OwnerProfile: Decodable { let id: String }
     func refresh() async {
-        if let response: Response = try? await request("/api/session") { account = response.account }
+        guard let response: Response = try? await request("/api/session") else { return }
+        account = response.account
+        if response.account?.can_publish == true {
+            let profile: OwnerProfile? = try? await request("/api/admin/channel/profile")
+            if let profile { setOwnedChannel(profile.id) }
+        } else {
+            ownedChannelID = nil
+        }
+    }
+
+    func setOwnedChannel(_ id: String) {
+        ownedChannelID = id
+        let defaults = UserDefaults.standard
+        let channels = defaults.string(forKey: "followedChannels") ?? ""
+        let cleaned = channels.split(separator: ",").filter { $0 != Substring(id) }.joined(separator: ",")
+        if channels != cleaned { defaults.set(cleaned, forKey: "followedChannels") }
     }
     func requireLogin() -> Bool {
         if account != nil { return true }
@@ -834,8 +859,11 @@ private struct CreatorHome: View {
     @EnvironmentObject private var auth: LiveSession
     @State private var profile: Profile?
     @State private var videos: [Video] = []
-    @State private var editing = false
-    @State private var publishing = false
+    private enum Modal: String, Identifiable {
+        case edit, publish
+        var id: String { rawValue }
+    }
+    @State private var modal: Modal?
     @State private var name = ""
     @State private var about = ""
     @State private var error = ""
@@ -852,8 +880,9 @@ private struct CreatorHome: View {
                             name = profile.name
                             about = profile.about
                             error = ""
-                            editing = true
-                        } label: { Label("Изменить", systemImage: "pencil") }
+                            avatarSelection = nil
+                            modal = .edit
+                        } label: { Label("Изменить", systemImage: "pencil").padding(.horizontal, 8).frame(minHeight: 44).contentShape(Rectangle()) }.buttonStyle(.plain).foregroundStyle(lime)
                     }
                 }
                 if let profile {
@@ -865,7 +894,7 @@ private struct CreatorHome: View {
                         }.padding(.bottom, 20)
                     Text(profile.name).font(.custom("DelaGothicOne-Regular", size: 23))
                     if !profile.about.isEmpty { Text(profile.about).font(.subheadline).foregroundStyle(.secondary) }
-                    Button { publishing = true } label: {
+                    Button { modal = .publish } label: {
                         Label("Опубликовать видео", systemImage: "plus").frame(maxWidth: .infinity, minHeight: 36)
                     }.buttonStyle(.borderedProminent).foregroundStyle(appBackground)
                     Text("Ваши видео").font(.headline)
@@ -896,7 +925,10 @@ private struct CreatorHome: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
         }
         .task(id: auth.account?.name) { await load() }
-        .sheet(isPresented: $editing) {
+        .sheet(item: $modal) { screen in
+            if screen == .publish {
+                PublishVideo(channel: profile?.name ?? "")
+            } else {
             NavigationStack {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
@@ -918,7 +950,7 @@ private struct CreatorHome: View {
                                 do {
                                     profile = try await request("/api/admin/channel/profile", method: "PUT",
                                                                 json: ["name": name, "about": about])
-                                    editing = false
+                                    modal = nil
                                 } catch { self.error = error.localizedDescription }
                             }
                         } label: { Text("Сохранить").frame(maxWidth: .infinity) }
@@ -926,6 +958,7 @@ private struct CreatorHome: View {
                     }.padding(16)
                 }.background(appBackground.ignoresSafeArea()).navigationTitle("Изменить канал")
                     .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { modal = nil }.disabled(saving) } }
                     .task(id: avatarSelection) {
                         guard let selection = avatarSelection else { return }
                         saving = true
@@ -938,7 +971,7 @@ private struct CreatorHome: View {
                     }
             }
         }
-        .sheet(isPresented: $publishing) { PublishVideo(channel: profile?.name ?? "") }
+        }
     }
 
     private func load() async {
@@ -949,6 +982,7 @@ private struct CreatorHome: View {
         do {
             let owner: Profile = try await request("/api/admin/channel/profile")
             profile = owner
+            auth.setOwnedChannel(owner.id)
             if let channel: Channel = try? await request("/api/channels/" + owner.id) { videos = channel.videos }
         } catch { self.error = error.localizedDescription }
     }
@@ -1081,5 +1115,6 @@ private func jpegImage(_ selection: PhotosPickerItem, maximum: CGFloat) async th
         source.draw(in: CGRect(origin: .zero, size: size))
     }
 }
+
 
 
