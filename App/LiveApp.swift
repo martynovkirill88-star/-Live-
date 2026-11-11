@@ -164,8 +164,9 @@ private struct Home: View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 HStack {
-                    Text("C").font(.title3.bold()).foregroundStyle(appBackground)
-                        .frame(width: 34, height: 34).background(lime, in: Circle())
+                    Image("BrandMark").resizable().scaledToFit()
+                        .frame(width: 34, height: 34).clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityHidden(true)
                     Text("Чепушка Live").font(.custom("DelaGothicOne-Regular", size: 17))
                     Spacer()
                     if auth.account?.role == "admin" {
