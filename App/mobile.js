@@ -46,9 +46,69 @@
         document.querySelector('.account-button')?.click();
     });
     const saved = footer.children[2];
-    saved.href = '/saved';
+    saved.href = '#subscriptions';
     saved.querySelector('use').setAttribute('href', '/icons.svg#bookmark');
-    saved.querySelector('small').textContent = 'Сохранённое';
+    saved.querySelector('small').textContent = 'Подписки';
+    saved.removeAttribute('data-route');
+    saved.addEventListener('click', async event => {
+        event.preventDefault();
+        if (document.querySelector('#iosSubscriptions')) return;
+        const dialog = document.createElement('div');
+        dialog.id = 'iosSubscriptions';
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-label', 'Подписки');
+        dialog.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#0c1211;padding:24px;overflow:auto';
+        const close = document.createElement('button');
+        close.textContent = 'Назад';
+        close.onclick = () => dialog.remove();
+        const title = document.createElement('h1');
+        title.textContent = 'Подписки';
+        const list = document.createElement('div');
+        list.textContent = 'Загружаем каналы…';
+        dialog.append(close, title, list);
+        document.body.append(dialog);
+        close.focus();
+        try {
+            const read = async path => {
+                const response = await fetch(path);
+                if (!response.ok) throw new Error(String(response.status));
+                return response.json();
+            };
+            const session = await read('/api/session');
+            if (!session.account) {
+                list.textContent = 'Войдите, чтобы посмотреть подписки.';
+                const login = document.createElement('button');
+                login.textContent = 'Войти';
+                login.onclick = () => {
+                    dialog.remove();
+                    document.querySelector('.account-button')?.click();
+                };
+                list.append(document.createElement('br'), login);
+                return;
+            }
+            const catalog = await read('/api/catalog');
+            const ids = [...new Set(catalog.items.map(item => item.channel_id).filter(Boolean))];
+            const channels = [];
+            for (let index = 0; index < ids.length; index += 6) {
+                if (!dialog.isConnected) return;
+                channels.push(...await Promise.all(ids.slice(index, index + 6)
+                    .map(id => read('/api/channels/' + encodeURIComponent(id)))));
+            }
+            list.textContent = '';
+            for (const channel of channels.filter(channel => channel.subscribed)) {
+                const link = document.createElement('a');
+                link.href = '/channel/' + encodeURIComponent(channel.id);
+                link.dataset.route = '';
+                link.style.cssText = 'display:block;padding:14px 0';
+                link.textContent = channel.profile.name;
+                link.onclick = () => dialog.remove();
+                list.append(link);
+            }
+            if (!list.children.length) list.textContent = 'В каталоге нет каналов, на которые вы подписаны.';
+        } catch {
+            list.textContent = 'Не удалось загрузить подписки. Закройте экран и попробуйте снова.';
+        }
+    });
 
     function updateScreen() {
         const home = location.pathname === '/' && !location.search;
@@ -56,6 +116,16 @@
         document.body.classList.toggle('ios-watch', location.pathname.startsWith('/watch/'));
         for (const link of footer.querySelectorAll('a')) {
             link.classList.toggle('ios-current', link.pathname === location.pathname && !link.hash);
+        }
+        const channel = root.querySelector('.public-channel');
+        const poster = channel?.querySelector('.thumbnail img');
+        if (poster && !channel.querySelector('.ios-channel-banner')) {
+            const banner = document.createElement('img');
+            banner.className = 'ios-channel-banner';
+            banner.alt = '';
+            banner.src = poster.src;
+            banner.style.cssText = 'width:100%;height:100px;object-fit:cover;border-radius:14px;margin-bottom:8px';
+            channel.prepend(banner);
         }
         if (!home) return;
         const heading = root.querySelector('.catalog-head h1');
@@ -70,3 +140,4 @@
     new MutationObserver(updateScreen).observe(root, {childList: true});
     updateScreen();
 })();
+
