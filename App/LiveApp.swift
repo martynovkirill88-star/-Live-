@@ -1666,17 +1666,13 @@ private struct OwnerConsoleBrowser: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
+        // Keep the server-issued owner cookies across launches of the studio.
+        config.websiteDataStore = .default()
         config.allowsInlineMediaPlayback = true
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
-        Task { @MainActor in
-            for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] {
-                await config.websiteDataStore.httpCookieStore.setCookie(cookie)
-            }
-            view.load(URLRequest(url: origin.appendingPathComponent("api/owner-studio/console")))
-        }
+        view.load(URLRequest(url: origin.appendingPathComponent("api/owner-studio/console")))
         return view
     }
     func updateUIView(_ view: WKWebView, context: Context) {}
