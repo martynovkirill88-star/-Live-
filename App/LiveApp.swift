@@ -650,6 +650,7 @@ private struct WebsitePlayer: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
         config.allowsInlineMediaPlayback = true
         config.allowsAirPlayForMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = false
