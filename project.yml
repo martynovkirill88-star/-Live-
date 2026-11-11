@@ -1,7 +1,7 @@
 name: ChepushkaLive
 options:
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "16.0"
 targets:
   ChepushkaLive:
     type: application
@@ -14,9 +14,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Чепушка Live
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSCameraUsageDescription: Камера используется для записи эфира по вашему запросу.
-        INFOPLIST_KEY_NSMicrophoneUsageDescription: Микрофон используется для звука эфира.
-        MARKETING_VERSION: 2.0.1
-        CURRENT_PROJECT_VERSION: 3
+        MARKETING_VERSION: 3.0.0
+        CURRENT_PROJECT_VERSION: 4
         SWIFT_VERSION: 5.0
+
 
