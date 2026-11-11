@@ -11,13 +11,14 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
 #player { width: 100%; height: 100%; margin: 0; aspect-ratio: auto; border-radius: 0; }
 #player video { width: 100%; height: 100%; }
 .app-fullscreen #player video,
-.app-fullscreen #player .player-hold { object-fit: cover !important; }
+.app-fullscreen #player .player-hold { object-fit: contain !important; }
 .app-fullscreen #player .player-toolbar {
   padding-left: max(16px, env(safe-area-inset-left));
   padding-right: max(16px, env(safe-area-inset-right));
   padding-bottom: max(12px, env(safe-area-inset-bottom));
 }
 #player .pip { display: none !important; }
+#player.user-inactive:not(:has(.quality-menu:not([hidden]))):not(:has(.timeline.dragging)) .player-toolbar { opacity: 0; pointer-events: none; }
 </style>
 <script src="lottie-light.min.js" defer></script>
 <script src="loading-data.js" defer></script>
@@ -139,5 +140,6 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
   <path d="M20 21a8 8 0 0 0-16 0" />
 </symbol></svg><div id="player"></div></body>
 </html>
+
 
 

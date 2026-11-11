@@ -34,6 +34,7 @@ private struct Video: Decodable, Identifiable, Hashable {
     let status, moderation, publication_policy, moderation_note: String?
     let published: Bool?
     let publish_at: Double?
+    let created: Double?
     let duration: Double?
     let views: Int?
     let live: Bool
@@ -123,6 +124,8 @@ private struct Artwork: View {
 }
 
 private struct Home: View {
+    @EnvironmentObject private var auth: LiveSession
+    @State private var ownerConsole = false
     @State private var videos: [Video] = []
     @State private var failure = false
     @State private var tab = "Главная"
@@ -133,7 +136,7 @@ private struct Home: View {
     @AppStorage("followedChannels") private var followed = ""
     @AppStorage("savedVideos") private var saved = ""
     private var visible: [Video] {
-        videos.filter { video in
+        let filtered = videos.filter { video in
             let title = video.title + " " + (video.description ?? "")
             if !query.isEmpty && !title.localizedCaseInsensitiveContains(query) { return false }
             switch tab {
@@ -143,6 +146,7 @@ private struct Home: View {
             default:
                 switch filter {
                 case "В эфире": return video.live
+                case "Общий": return !video.live && (video.category ?? "general") == "general"
                 case "Музыка": return video.category == "music" || (video.category == nil && title.localizedCaseInsensitiveContains("музык"))
                 case "Путешествия": return video.category == "travel" || (video.category == nil && title.localizedCaseInsensitiveContains("путешеств"))
                 case "Детский": return video.category == "kids"
@@ -150,6 +154,10 @@ private struct Home: View {
                 }
             }
         }
+        if tab == "Главная" && filter == "Всё" && query.isEmpty {
+            return LocalDiscovery.rank(filtered, saved: Set(saved.split(separator: ",").map(String.init)), followed: Set(followed.split(separator: ",").map(String.init)))
+        }
+        return filtered
     }
 
     var body: some View {
@@ -160,6 +168,11 @@ private struct Home: View {
                         .frame(width: 34, height: 34).background(lime, in: Circle())
                     Text("Чепушка Live").font(.custom("DelaGothicOne-Regular", size: 17))
                     Spacer()
+                    if auth.account?.role == "admin" {
+                        Button { ownerConsole = true } label: {
+                            Image(systemName: "gearshape").frame(width: 44, height: 44)
+                        }.accessibilityLabel("Админ-панель")
+                    }
                     Button { search.toggle(); if !search { query = "" } } label: {
                         Image(systemName: "magnifyingglass").frame(width: 44, height: 44)
                     }.accessibilityLabel("Поиск")
@@ -173,7 +186,7 @@ private struct Home: View {
                         if tab == "Главная" {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 8) {
-                                    ForEach(["Всё", "В эфире", "Музыка", "Путешествия", "Детский"], id: \.self) { value in
+                                    ForEach(["Всё", "В эфире", "Общий", "Музыка", "Путешествия", "Детский"], id: \.self) { value in
                                         Button { filter = value } label: {
                                             Text(value).font(.subheadline).padding(.horizontal, 14)
                                                 .padding(.vertical, 9)
@@ -216,6 +229,7 @@ private struct Home: View {
                 }
             }
             .task { await load() }
+            .sheet(isPresented: $ownerConsole) { OwnerConsoleSheet() }
         }
     }
 
@@ -640,6 +654,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         config.allowsAirPlayForMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = false
         config.userContentController.add(context.coordinator, name: "playerOrientation")
+        config.userContentController.add(context.coordinator, name: "playerWatched")
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -689,6 +704,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         coordinator.closeFullscreen()
         coordinator.player?.evaluateJavaScript("window.activePlayer?.destroy()", completionHandler: nil)
         coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerOrientation")
+        coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerWatched")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -707,6 +723,7 @@ private struct WebsitePlayer: UIViewRepresentable {
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame else { return }
+            if message.name == "playerWatched" { LocalDiscovery.record(video.id); return }
             if fullscreen != nil { closeFullscreen(); return }
             guard let presenter = host?.window?.rootViewController else { return }
             var top = presenter
@@ -797,7 +814,7 @@ private struct WriteResult: Decodable { let ok: Bool? }
 
 @MainActor
 private final class LiveSession: ObservableObject {
-    struct Account: Decodable { let name: String; let can_publish: Bool }
+    struct Account: Decodable { let name: String; let can_publish: Bool; let role: String? }
     struct Response: Decodable { let account: Account? }
     @Published var account: Account?
     @Published var showLogin = false
@@ -1589,3 +1606,107 @@ private struct GalleryVideo: Transferable {
 
 
 
+
+
+private enum LocalDiscovery {
+    static let key = "chepushka.discovery.v1"
+    static func record(_ id: String) {
+        var recent = history()
+        recent[id] = Date().timeIntervalSince1970
+        let entries = recent.sorted { $0.value > $1.value }.prefix(100)
+        UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0.value) }), forKey: key)
+    }
+    private static func history() -> [String: Double] {
+        UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
+    }
+    static func rank(_ videos: [Video], saved: Set<String>, followed: Set<String>) -> [Video] {
+        let recent = history()
+        let now = Date().timeIntervalSince1970
+        var channels: [String: Double] = [:]
+        var categories: [String: Double] = [:]
+        for video in videos {
+            let age = (now - (recent[video.id] ?? 0)) / 86400
+            let weight = (age <= 45 ? exp(-age / 18) : 0) + (saved.contains(video.id) ? 2 : 0)
+            if let channel = video.channel_id { channels[channel, default: 0] += weight }
+            if let category = video.category, category != "general" { categories[category, default: 0] += weight }
+        }
+        func score(_ video: Video) -> Double {
+            let channel = video.channel_id ?? ""
+            let freshness = max(0, 1 - (now - (video.created ?? 0)) / 2592000)
+            return (channels[channel] ?? 0) * 2 + (categories[video.category ?? ""] ?? 0) * 3
+                + (followed.contains(channel) ? 2 : 0) + freshness
+                + log1p(Double(video.views ?? 0)) * 0.12 - (recent[video.id] == nil ? 0 : 4)
+        }
+        var ranked = videos.sorted { a, b in
+            let left = score(a), right = score(b)
+            return left == right ? (a.created ?? 0) > (b.created ?? 0) : left > right
+        }
+        for index in ranked.indices.dropFirst(2) {
+            guard let channel = ranked[index].channel_id, ranked[index - 1].channel_id == channel,
+                  ranked[index - 2].channel_id == channel,
+                  let next = ranked.indices.dropFirst(index + 1).first(where: { ranked[$0].channel_id != channel }) else { continue }
+            let alternate = ranked.remove(at: next)
+            ranked.insert(alternate, at: index)
+        }
+        return ranked
+    }
+}
+
+private struct OwnerConsoleSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            OwnerConsoleBrowser().navigationTitle("Админ-панель").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { dismiss() } } }
+        }
+    }
+}
+
+private struct OwnerConsoleBrowser: UIViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.allowsInlineMediaPlayback = true
+        let view = WKWebView(frame: .zero, configuration: config)
+        view.navigationDelegate = context.coordinator
+        view.uiDelegate = context.coordinator
+        Task { @MainActor in
+            for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] {
+                await config.websiteDataStore.httpCookieStore.setCookie(cookie)
+            }
+            view.load(URLRequest(url: origin.appendingPathComponent("api/owner-studio/console")))
+        }
+        return view
+    }
+    func updateUIView(_ view: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(action.request.url?.host == origin.host && action.request.url?.scheme == "https" ? .allow : .cancel)
+        }
+        private func presenter(_ view: WKWebView) -> UIViewController? {
+            var top = view.window?.rootViewController
+            while let presented = top?.presentedViewController { top = presented }
+            return top
+        }
+        func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+            guard let top = presenter(webView) else { completionHandler(false); return }
+            let alert = UIAlertController(title: message, message: nil, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { _ in completionHandler(false) })
+            alert.addAction(UIAlertAction(title: "Продолжить", style: .destructive) { _ in completionHandler(true) })
+            top.present(alert, animated: true)
+        }
+        func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                     defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+            guard let top = presenter(webView) else { completionHandler(nil); return }
+            let alert = UIAlertController(title: prompt, message: nil, preferredStyle: .alert)
+            alert.addTextField { $0.text = defaultText }
+            alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { _ in completionHandler(nil) })
+            alert.addAction(UIAlertAction(title: "Готово", style: .default) { [weak alert] _ in completionHandler(alert?.textFields?.first?.text) })
+            top.present(alert, animated: true)
+        }
+    }
+}
