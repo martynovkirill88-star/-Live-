@@ -10,7 +10,21 @@ private let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
 private let lime = Color(red: 0.792, green: 0.98, blue: 0.459)
 private let origin = URL(string: "https://live.chepushkavpn.fun/")!
 
+private enum VideoCategory: String, CaseIterable {
+    case general, music, travel, kids
+
+    var label: String {
+        switch self {
+        case .general: return "Общий"
+        case .music: return "Музыка"
+        case .travel: return "Путешествия"
+        case .kids: return "Детский"
+        }
+    }
+}
+
 private struct Video: Decodable, Identifiable, Hashable {
+    let category: String?
     struct Quality: Decodable, Hashable {
         let code: String
         let height: Int
@@ -129,8 +143,9 @@ private struct Home: View {
             default:
                 switch filter {
                 case "В эфире": return video.live
-                case "Музыка": return title.localizedCaseInsensitiveContains("музык")
-                case "Путешествия": return title.localizedCaseInsensitiveContains("путешеств")
+                case "Музыка": return video.category == "music" || (video.category == nil && title.localizedCaseInsensitiveContains("музык"))
+                case "Путешествия": return video.category == "travel" || (video.category == nil && title.localizedCaseInsensitiveContains("путешеств"))
+                case "Детский": return video.category == "kids"
                 default: return true
                 }
             }
@@ -158,7 +173,7 @@ private struct Home: View {
                         if tab == "Главная" {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 8) {
-                                    ForEach(["Всё", "В эфире", "Музыка", "Путешествия"], id: \.self) { value in
+                                    ForEach(["Всё", "В эфире", "Музыка", "Путешествия", "Детский"], id: \.self) { value in
                                         Button { filter = value } label: {
                                             Text(value).font(.subheadline).padding(.horizontal, 14)
                                                 .padding(.vertical, 9)
@@ -1160,6 +1175,7 @@ private struct CreatorHome: View {
 private struct EditPublishedVideo: View {
     let video: Video
     @Environment(\.dismiss) private var dismiss
+    @State private var category: VideoCategory
     @State private var title: String
     @State private var description: String
     @State private var error = ""
@@ -1167,6 +1183,7 @@ private struct EditPublishedVideo: View {
 
     init(video: Video) {
         self.video = video
+        _category = State(initialValue: VideoCategory(rawValue: video.category ?? "") ?? .general)
         _title = State(initialValue: video.title)
         _description = State(initialValue: video.description ?? "")
     }
@@ -1181,6 +1198,12 @@ private struct EditPublishedVideo: View {
                     Text("Описание").font(.caption).foregroundStyle(.secondary)
                     TextEditor(text: $description).scrollContentBackground(.hidden)
                         .frame(minHeight: 120).padding(8).creatorField()
+                    Picker("Раздел", selection: $category) {
+                        ForEach(VideoCategory.allCases, id: \.self) { item in Text(item.label).tag(item) }
+                    }
+                    if video.moderation == "rejected", let reason = video.moderation_note, !reason.isEmpty {
+                        Label(reason, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.secondary)
+                    }
                     if video.publication_policy != "private" {
                         Label("После сохранения видео снова отправится на модерацию.", systemImage: "info.circle")
                             .font(.caption).foregroundStyle(.secondary)
@@ -1190,7 +1213,7 @@ private struct EditPublishedVideo: View {
             }
             creatorButton(busy ? "Сохраняем…" : "Сохранить") { Task { await save() } }
                 .disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                          (title == video.title && description == (video.description ?? "")))
+                          (title == video.title && description == (video.description ?? "") && category.rawValue == (video.category ?? "general")))
                 .padding(16)
         }
         .background(appBackground.ignoresSafeArea())
@@ -1203,14 +1226,15 @@ private struct EditPublishedVideo: View {
         defer { busy = false }
         do {
             let _: WriteResult = try await request("/api/admin/media/" + video.id + "/owner-edit",
-                method: "PATCH", json: ["title": title, "description": description])
+                method: "PATCH", json: ["title": title, "description": description, "category": category.rawValue])
             dismiss()
         } catch { self.error = error.localizedDescription }
     }
 }
 
 private struct PublishVideo: View {
-    private struct Capabilities: Decodable { let publication_settings: Bool }
+    private struct Capabilities: Decodable { let publication_settings: Bool; let video_categories: Bool? }
+    @State private var category: VideoCategory = .general
     @State private var privateVideo = false
     @State private var commentsEnabled = true
     @State private var scheduled = false
@@ -1387,6 +1411,15 @@ private struct PublishVideo: View {
                         .contentShape(Rectangle())
                 }.buttonStyle(.plain)
                 Divider().padding(.leading, 34)
+                Menu {
+                    ForEach(VideoCategory.allCases, id: \.self) { item in
+                        Button(item.label) { category = item }
+                    }
+                } label: {
+                    publicationRow("Раздел", icon: "square.grid.2x2", value: category.label)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                Divider().padding(.leading, 34)
                 Toggle(isOn: $commentsEnabled) { Label("Комментарии", systemImage: "bubble") }
                     .font(.subheadline).frame(minHeight: 45)
                 Divider().padding(.leading, 34)
@@ -1447,7 +1480,7 @@ private struct PublishVideo: View {
             let handle = try FileHandle(forReadingFrom: file)
             defer { try? handle.close() }
             let capabilities: Capabilities = try await request("/api/admin/publication-capabilities")
-            guard capabilities.publication_settings else { throw URLError(.badServerResponse) }
+            guard capabilities.publication_settings, capabilities.video_categories == true else { throw URLError(.badServerResponse) }
             let endpoint = "/api/admin/uploads"
             var state: Transfer
             if let previous = transfer { state = try await request(endpoint + "/" + previous.id) }
@@ -1470,7 +1503,8 @@ private struct PublishVideo: View {
             uploadPhase = "Файл передан. Добавляем в очередь обработки…"
             var settings: [String: Any] = [
                 "title": title, "description": description, "published": !privateVideo,
-                "publication_policy": privateVideo ? "private" : "public", "comments_enabled": commentsEnabled
+                "publication_policy": privateVideo ? "private" : "public", "comments_enabled": commentsEnabled,
+                "category": category.rawValue
             ]
             if scheduled && !privateVideo { settings["publish_at"] = publishDate.timeIntervalSince1970 }
             let _: WriteResult = try await request(uploadPath + "/complete", method: "POST", json: settings)
@@ -1547,6 +1581,7 @@ private struct GalleryVideo: Transferable {
         }
     }
 }
+
 
 
 
