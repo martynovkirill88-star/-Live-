@@ -1,0 +1,22 @@
+name: Build iPhone IPA
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Compile for iPhone
+        run: xcodebuild -project ChepushkaLive.xcodeproj -scheme ChepushkaLive -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+      - name: Package unsigned IPA
+        run: |
+          mkdir Payload
+          ditto build/Build/Products/Release-iphoneos/ChepushkaLive.app Payload/ChepushkaLive.app
+          ditto -c -k --keepParent Payload ChepushkaLive-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChepushkaLive-unsigned
+          path: ChepushkaLive-unsigned.ipa
