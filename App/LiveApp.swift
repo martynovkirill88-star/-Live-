@@ -318,121 +318,307 @@ private struct CatalogSearch: View {
     @StateObject private var voice = LocalSearchSpeech()
     @State private var query = ""
     @State private var submitted: String?
+    @State private var filter = "Всё"
     @AppStorage("catalogSearchCounts") private var storedCounts = Data()
+    @AppStorage("catalogSearchHistory") private var storedHistory = Data()
+    private let background = Color(red: 10/255, green: 16/255, blue: 17/255)
+    private let panel = Color(red: 27/255, green: 40/255, blue: 37/255)
+    private let muted = Color(red: 164/255, green: 179/255, blue: 175/255)
+    private let accent = Color(red: 202/255, green: 250/255, blue: 117/255)
+    private let topics = ["Путешествия", "Прямые эфиры", "Музыка", "Детский"]
+    private var history: [String] { (try? JSONDecoder().decode([String].self, from: storedHistory)) ?? [] }
+    private var counts: [String: Int] { (try? JSONDecoder().decode([String: Int].self, from: storedCounts)) ?? [:] }
+    private var popular: [Video] { videos.sorted { ($0.views ?? 0) > ($1.views ?? 0) } }
+    private var term: String { normalized(query) }
+    private var showingResults: Bool { submitted.map { normalized($0) == term } ?? false }
 
     private func normalized(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "ru"))
     }
 
-    private var counts: [String: Int] {
-        (try? JSONDecoder().decode([String: Int].self, from: storedCounts)) ?? [:]
-    }
-
     private var suggestions: [String] {
-        let term = normalized(query)
         let counts = counts
-        var titles: [String: Video] = [:]
-        for video in videos {
-            let key = normalized(video.title)
-            guard !key.isEmpty, term.isEmpty || key.contains(term) else { continue }
-            if titles[key] == nil || (video.views ?? 0) > (titles[key]?.views ?? 0) { titles[key] = video }
+        let candidates = topics + history + popular.flatMap { [$0.title, $0.channel] }
+        var seen = Set<String>()
+        let matches = candidates.filter {
+            let key = normalized($0)
+            return !key.isEmpty && key.contains(term) && seen.insert(key).inserted
         }
-        return titles.values.sorted { a, b in
-            let left = normalized(a.title), right = normalized(b.title)
-            let leftPrefix = left.hasPrefix(term), rightPrefix = right.hasPrefix(term)
-            if leftPrefix != rightPrefix { return leftPrefix }
+        return Array(matches.enumerated().sorted { a, b in
+            let left = normalized(a.element), right = normalized(b.element)
+            if left.hasPrefix(term) != right.hasPrefix(term) { return left.hasPrefix(term) }
             if counts[left, default: 0] != counts[right, default: 0] {
                 return counts[left, default: 0] > counts[right, default: 0]
             }
-            if (a.views ?? 0) != (b.views ?? 0) { return (a.views ?? 0) > (b.views ?? 0) }
-            return left < right
-        }.prefix(8).map(\.title)
+            return a.offset < b.offset
+        }.prefix(term.isEmpty ? 4 : 8).map(\.element))
     }
 
-    private func results(_ term: String) -> [Video] {
-        let key = normalized(term)
-        return videos.filter { video in
-            normalized(video.title + " " + video.channel + " " + (video.description ?? "")).contains(key)
+    private func results(_ text: String) -> [Video] {
+        let key = normalized(text)
+        let categories = ["путешествия": "travel", "музыка": "music", "детский": "kids"]
+        return popular.filter { video in
+            if key == "прямые эфиры" { return video.live }
+            if let category = categories[key], video.category == category { return true }
+            return normalized(video.title + " " + video.channel + " " + (video.description ?? "")).contains(key)
         }
     }
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "chevron.left").frame(width: 44, height: 44).chromeCapsule()
-                    }.buttonStyle(.plain).accessibilityLabel("Назад")
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Поиск видео", text: $query)
-                            .focused($focused).submitLabel(.search)
-                            .onSubmit { submit(query) }
-                        if !query.isEmpty {
-                            Button { voice.stop(); query = ""; submitted = nil; focused = true } label: {
-                                Image(systemName: "xmark.circle.fill").frame(width: 34, height: 44)
-                            }.buttonStyle(.plain).accessibilityLabel("Очистить поиск")
-                        }
-                    }.padding(.leading, 12).padding(.trailing, 6).frame(minHeight: 46).chromeCapsule()
-                    Button {
-                        if voice.active { voice.stop(); return }
-                        focused = false
-                        submitted = nil
-                        voice.start(hints: suggestions) { query = $0 }
-                    } label: {
-                        Image(systemName: voice.active ? "stop.fill" : "mic.fill")
-                            .foregroundStyle(voice.active ? lime : .white)
-                            .frame(width: 46, height: 46).chromeCapsule()
-                    }.buttonStyle(.plain)
-                        .accessibilityLabel(voice.active ? "Остановить запись" : "Голосовой поиск")
-                }.padding(.horizontal, 16)
-                if !normalized(query).isEmpty, normalized(query) != normalized(submitted ?? "") {
-                    Button("Найти") { submit(query) }
-                        .buttonStyle(.borderedProminent)
-                        .foregroundStyle(appBackground)
-                        .padding(.horizontal, 16)
-                }
+            VStack(spacing: 0) {
+                searchHeader
                 if voice.active || !voice.message.isEmpty {
                     Text(voice.active ? "Слушаю…" : voice.message).font(.footnote)
-                        .foregroundStyle(.secondary).padding(.horizontal, 16)
+                        .foregroundStyle(muted).padding(.horizontal, 16).padding(.top, 8)
                 }
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        if let submitted, normalized(query) == normalized(submitted) {
-                            let matches = results(submitted)
-                            Text(matches.isEmpty ? "Ничего не найдено" : "Результаты").font(.headline)
-                            ForEach(matches) { video in
-                                NavigationLink(value: video) { FeedCard(video: video) }.buttonStyle(.plain)
-                            }
-                        } else {
-                            if !suggestions.isEmpty {
-                                Text(query.isEmpty ? "Популярное в каталоге" : "Подсказки").font(.headline)
-                            }
-                            ForEach(suggestions, id: \.self) { title in
-                                Button { submit(title) } label: {
-                                    HStack(spacing: 12) {
-                                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                                        Text(title).lineLimit(2)
-                                        Spacer()
-                                        Image(systemName: "arrow.up.left").foregroundStyle(.secondary)
-                                    }.frame(minHeight: 44).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                            }
-                        }
-                    }.padding(16)
-                }.scrollDismissesKeyboard(.interactively)
+                    if showingResults { resultContent }
+                    else { suggestionContent }
+                }
+                .scrollDismissesKeyboard(.interactively)
             }
             .padding(.top, 8)
-            .background(appBackground.ignoresSafeArea())
+            .background(background.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
-            .navigationDestination(for: Video.self) { video in
-                Watch(video: video, others: videos.filter { $0.id != video.id })
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                case .video(let video): Watch(video: video, others: videos.filter { $0.id != video.id })
+                case .channel(let id): ChannelScreen(id: id)
+                }
             }
-            .task { focused = true }
         }
         .onDisappear { voice.stop() }
         .onChange(of: scenePhase) { phase in if phase == .background { voice.stop() } }
+    }
+
+    private var searchHeader: some View {
+        HStack(spacing: 10) {
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.left").font(.system(size: 15, weight: .medium))
+                    .frame(width: 24, height: 48).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("Назад")
+            HStack(spacing: 8) {
+                if query.isEmpty { Image(systemName: "magnifyingglass").foregroundStyle(muted) }
+                TextField("Видео, каналы, эфиры", text: $query, prompt: Text("Видео, каналы, эфиры").foregroundStyle(muted))
+                    .font(.system(size: 13)).focused($focused).submitLabel(.search)
+                    .onSubmit { submit(query) }
+                if !query.isEmpty {
+                    Button {
+                        voice.stop()
+                        query = ""
+                        submitted = nil
+                        focused = true
+                    } label: {
+                        Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(muted).frame(width: 36, height: 48)
+                    }.buttonStyle(.plain).accessibilityLabel("Очистить поиск")
+                }
+            }.padding(.leading, 12).padding(.trailing, 6).frame(height: 48)
+                .background(panel, in: RoundedRectangle(cornerRadius: 13))
+            Button {
+                if voice.active { voice.stop(); return }
+                focused = false
+                submitted = nil
+                voice.start(hints: suggestions) { query = $0 }
+            } label: {
+                Image(systemName: voice.active ? "stop.fill" : "mic")
+                    .font(.system(size: 21, weight: .medium)).foregroundStyle(background)
+                    .frame(width: 44, height: 48).background(accent, in: RoundedRectangle(cornerRadius: 13))
+            }.buttonStyle(.plain).accessibilityLabel(voice.active ? "Остановить запись" : "Голосовой поиск")
+        }.padding(.horizontal, 16)
+    }
+
+    private var suggestionContent: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            Text(term.isEmpty ? "Популярные запросы" : "Подсказки")
+                .font(.custom("DelaGothicOne-Regular", size: 20))
+            if term.isEmpty {
+                Text("Вдохновение начинается с поиска").font(.system(size: 13))
+                    .foregroundStyle(muted).padding(.top, 5).padding(.bottom, 16)
+            } else {
+                suggestionRow(query, index: nil, icon: "magnifyingglass")
+                    .padding(.top, 8)
+            }
+            ForEach(Array(suggestions.enumerated()), id: \.element) { index, title in
+                if term.isEmpty || normalized(title) != term {
+                    suggestionRow(title, index: index + 1, icon: nil)
+                }
+            }
+            if term.isEmpty {
+                if !history.isEmpty {
+                    Rectangle().fill(panel).frame(height: 1).padding(.vertical, 18)
+                    HStack {
+                        Text("Недавние").font(.system(size: 16, weight: .semibold))
+                        Spacer()
+                        Button("Очистить") { storedHistory = Data(); storedCounts = Data() }
+                            .font(.system(size: 12)).foregroundStyle(accent).padding(.trailing, 18)
+                    }.padding(.bottom, 10)
+                    ForEach(Array(history.prefix(2)), id: \.self) { title in
+                        suggestionRow(title, index: nil, icon: "clock")
+                    }
+                }
+                if !popular.isEmpty {
+                    Text("Вам может понравиться").font(.system(size: 16, weight: .semibold))
+                        .padding(.top, 28).padding(.bottom, 18)
+                    ForEach(Array(popular.prefix(4))) { video in
+                        videoRow(video, compact: true).padding(.bottom, 18)
+                    }
+                }
+            }
+        }.padding(.horizontal, 16).padding(.top, 28).padding(.bottom, 16)
+    }
+
+    private func suggestionRow(_ title: String, index: Int?, icon: String?) -> some View {
+        Button { submit(title) } label: {
+            HStack(spacing: 14) {
+                Group {
+                    if let index { Text(String(format: "%02d", index)).font(.system(size: 12, weight: .semibold)).foregroundStyle(accent) }
+                    else if let icon { Image(systemName: icon).foregroundStyle(muted) }
+                }.frame(width: 20, alignment: .leading)
+                Text(title).font(.system(size: 15)).lineLimit(1)
+                Spacer()
+                Image(systemName: "arrow.up.right").font(.system(size: 14)).foregroundStyle(muted)
+            }.padding(.trailing, 8).frame(height: 46).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
+    private var resultContent: some View {
+        let matches = results(submitted ?? "")
+        let channels = matchedChannels(in: matches)
+        return VStack(alignment: .leading, spacing: 0) {
+            if matches.isEmpty && channels.isEmpty {
+                emptyContent
+            } else {
+                HStack(spacing: 8) {
+                    ForEach(["Всё", "Видео", "Каналы", "Эфиры"], id: \.self) { value in
+                        Button { filter = value } label: { chip(value, selected: filter == value) }
+                            .buttonStyle(.plain).accessibilityAddTraits(filter == value ? .isSelected : [])
+                    }
+                }.padding(.top, 18)
+                Text("По запросу «\(submitted ?? "")»")
+                    .font(.system(size: 15, weight: .semibold)).padding(.top, 22)
+                Text(resultSummary(matches: matches, channels: channels))
+                    .font(.system(size: 12)).foregroundStyle(muted).padding(.top, 6)
+                if filter == "Всё" || filter == "Каналы" {
+                    ForEach(channels, id: \.id) { channel in
+                        SearchChannelCard(id: channel.id, name: channel.video.channel, avatar: channel.video.channel_avatar,
+                                          fallbackCount: videos.filter { $0.channel_id == channel.id }.count, panel: panel, muted: muted)
+                            .padding(.top, 16)
+                    }
+                }
+                let visible = matches.filter { filter == "Всё" || (filter == "Видео" && !$0.live) || (filter == "Эфиры" && $0.live) }
+                if !visible.isEmpty {
+                    Text(filter == "Эфиры" ? "Эфиры" : "Видео").font(.system(size: 18, weight: .semibold))
+                        .padding(.top, 24).padding(.bottom, 18)
+                    ForEach(visible) { video in videoRow(video, compact: false).padding(.bottom, 24) }
+                } else if filter != "Всё" && (filter != "Каналы" || channels.isEmpty) {
+                    Text("В этом разделе ничего нет").font(.system(size: 14)).foregroundStyle(muted).padding(.top, 24)
+                }
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 20)
+    }
+
+    private func matchedChannels(in matches: [Video]) -> [(id: String, video: Video)] {
+        var seen = Set<String>()
+        return (videos.filter { normalized($0.channel).contains(term) } + matches).compactMap { video in
+            guard let id = video.channel_id, !id.isEmpty, seen.insert(id).inserted else { return nil }
+            return (id, video)
+        }
+    }
+
+    private func resultSummary(matches: [Video], channels: [(id: String, video: Video)]) -> String {
+        let parts = [channels.isEmpty ? nil : channels.count == 1 ? "Канал" : "Каналы: \(channels.count)",
+                     matches.isEmpty ? nil : "\(matches.count) видео"].compactMap { $0 }
+        return parts.joined(separator: " и ")
+    }
+
+    private var emptyContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(spacing: 0) {
+                Image(systemName: "magnifyingglass").font(.system(size: 21))
+                    .frame(width: 72, height: 72).background(panel, in: Circle())
+                Text("Ничего не найдено").font(.custom("DelaGothicOne-Regular", size: 20))
+                    .padding(.top, 24)
+                Text("По запросу «\(submitted ?? "")»\nпока нет видео или каналов.")
+                    .font(.system(size: 14)).foregroundStyle(muted).padding(.top, 14)
+                Text("Проверьте написание или попробуйте\nболее короткий запрос.")
+                    .font(.system(size: 13)).foregroundStyle(muted).padding(.top, 20)
+            }.multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.top, 72)
+            Button {
+                submitted = nil
+                focused = true
+            } label: {
+                Text("Изменить запрос").font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(background).frame(maxWidth: .infinity).frame(height: 46)
+                    .background(accent, in: RoundedRectangle(cornerRadius: 13))
+            }.buttonStyle(.plain).padding(.top, 28)
+            Rectangle().fill(panel).frame(height: 1).padding(.top, 38).padding(.bottom, 24)
+            Text("Попробуйте поискать").font(.system(size: 17, weight: .semibold)).padding(.bottom, 18)
+            let alternatives = [topics[0], topics[1], topics[2], popular.first?.channel ?? topics[3]]
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(0..<2) { row in
+                    HStack(spacing: 8) {
+                        ForEach(0..<2) { column in
+                            let value = alternatives[row * 2 + column]
+                            Button { submit(value) } label: { chip(value, horizontalPadding: 20) }.buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            Text("Ищите по названию видео, теме\nили имени автора.")
+                .font(.system(size: 12)).foregroundStyle(muted).padding(.top, 42)
+        }
+    }
+
+    private func chip(_ title: String, selected: Bool = false, horizontalPadding: CGFloat = 14) -> some View {
+        Text(title).font(.system(size: 13)).lineLimit(1)
+            .padding(.horizontal, horizontalPadding).frame(height: 34)
+            .foregroundStyle(selected ? background : .white)
+            .background(selected ? accent : panel, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func videoRow(_ video: Video, compact: Bool) -> some View {
+        NavigationLink(value: Route.video(video)) {
+            HStack(alignment: .top, spacing: 12) {
+                Artwork(path: video.poster)
+                    .frame(width: compact ? 128 : 144, height: compact ? 72 : 81)
+                    .overlay(alignment: .bottomTrailing) {
+                        if !compact, !video.live, let duration = video.duration, duration > 0 {
+                            Text(clock(duration)).font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 5).padding(.vertical, 3)
+                                .background(background, in: RoundedRectangle(cornerRadius: 4)).padding(5)
+                        }
+                    }.clipShape(RoundedRectangle(cornerRadius: 11))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(video.title).font(.system(size: 14, weight: .semibold)).lineLimit(2)
+                    if !compact { Spacer(minLength: 3) }
+                    if compact {
+                        Text(video.channel + (video.live ? " · Прямой эфир" : " · \(video.views ?? 0) просмотров"))
+                            .font(.system(size: 11)).foregroundStyle(muted).lineLimit(1)
+                    } else {
+                        Text(video.channel).font(.system(size: 11)).foregroundStyle(muted).lineLimit(1)
+                    }
+                    if video.live {
+                        Text("В ЭФИРЕ").font(.system(size: 10, weight: .medium)).foregroundStyle(accent)
+                    } else if compact, let duration = video.duration, duration > 0 {
+                        Text(clock(duration)).font(.system(size: 10)).foregroundStyle(muted)
+                    } else if !compact {
+                        Text(videoMetadata(video)).font(.system(size: 10)).foregroundStyle(muted).lineLimit(1)
+                    }
+                }.frame(height: compact ? 72 : 81, alignment: .topLeading).padding(.top, 3)
+                Spacer(minLength: 0)
+            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
+    private func videoMetadata(_ video: Video) -> String {
+        let views = "\(video.views ?? 0) просмотров"
+        guard let created = video.created else { return views }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "ru")
+        return views + " · " + formatter.localizedString(for: Date(timeIntervalSince1970: created), relativeTo: Date())
     }
 
     private func submit(_ text: String) {
@@ -442,13 +628,42 @@ private struct CatalogSearch: View {
         focused = false
         query = text
         submitted = text
-        var history = counts
-        if history.count >= 100 && history[key] == nil,
-           let leastUsed = history.min(by: { $0.value < $1.value })?.key {
-            history.removeValue(forKey: leastUsed)
+        filter = "Всё"
+        var nextCounts = counts
+        if nextCounts.count >= 100 && nextCounts[key] == nil,
+           let leastUsed = nextCounts.min(by: { $0.value < $1.value })?.key {
+            nextCounts.removeValue(forKey: leastUsed)
         }
-        history[key, default: 0] += 1
-        if let encoded = try? JSONEncoder().encode(history) { storedCounts = encoded }
+        nextCounts[key, default: 0] += 1
+        if let encoded = try? JSONEncoder().encode(nextCounts) { storedCounts = encoded }
+        let nextHistory = Array(([text] + history.filter { normalized($0) != key }).prefix(20))
+        if let encoded = try? JSONEncoder().encode(nextHistory) { storedHistory = encoded }
+    }
+}
+
+private struct SearchChannelCard: View {
+    let id: String
+    let name: String
+    let avatar: String?
+    let fallbackCount: Int
+    let panel: Color
+    let muted: Color
+    @State private var details: Channel?
+
+    var body: some View {
+        NavigationLink(value: Route.channel(id)) {
+            HStack(spacing: 12) {
+                Artwork(path: details?.profile.avatar ?? avatar).frame(width: 52, height: 52).clipShape(Circle())
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(details?.profile.name ?? name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                    Text(details.map { "\($0.subscribers) подписчиков · \($0.videos.count) видео" } ?? "\(fallbackCount) видео")
+                        .font(.system(size: 11)).foregroundStyle(muted)
+                }
+                Spacer()
+            }.padding(12).frame(height: 76)
+                .background(panel, in: RoundedRectangle(cornerRadius: 13))
+        }.buttonStyle(.plain)
+            .task(id: id) { details = try? await request("/api/channels/" + id) }
     }
 }
 
