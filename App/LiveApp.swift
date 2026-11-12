@@ -1767,13 +1767,22 @@ private struct CreatorHome: View {
         .sheet(item: $editingVideo, onDismiss: { Task { await refreshVideos() } }) { video in
             EditPublishedVideo(video: video)
         }
-        .confirmationDialog("Удалить видео?", isPresented: Binding(
-            get: { deletingVideo != nil },
-            set: { if !$0 { deletingVideo = nil } }
-        ), titleVisibility: .visible, presenting: deletingVideo) { video in
-            Button("Удалить", role: .destructive) { Task { await removeVideo(video) } }
-        } message: { video in
-            Text("«\(video.title)» будет удалено без возможности восстановления.")
+        .sheet(item: $deletingVideo) { video in
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Удалить видео?").font(.title3.bold())
+                ownerVideoRow(video).padding(12).creatorField()
+                Text("Видео будет удалено из вашей студии. Восстановить его не получится.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                HStack {
+                    Button("Отмена") { deletingVideo = nil }
+                        .frame(maxWidth: .infinity, minHeight: 44).background(creatorSurface, in: RoundedRectangle(cornerRadius: 10))
+                    Button("Удалить видео") { Task { await removeVideo(video) } }
+                        .foregroundStyle(.black).frame(maxWidth: .infinity, minHeight: 44)
+                        .background(Color(red: 1, green: 0.67, blue: 0.65), in: RoundedRectangle(cornerRadius: 10))
+                }.buttonStyle(.plain)
+            }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(appBackground.ignoresSafeArea())
+                .presentationDetents([.medium])
         }
         .alert("Видео отклонено", isPresented: Binding(
             get: { rejectedVideo != nil },
@@ -1793,7 +1802,14 @@ private struct CreatorHome: View {
         let mine = videos.filter { !$0.live && $0.status != "starting" }
         let shown = mine.filter { video in
             let published = publicationStatus(video) == "Опубликовано"
-            let matchesFilter = studioFilter == "Всё" || (studioFilter == "Опубликовано" ? published : !published)
+            let matchesFilter: Bool
+            switch studioFilter {
+            case "Опубликовано": matchesFilter = published
+            case "В работе": matchesFilter = !published
+            case "Загрузка и доступ":
+                matchesFilter = video.publication_policy == "private" || ["queued", "processing", "uploading"].contains(video.status ?? "")
+            default: matchesFilter = true
+            }
             return matchesFilter && (studioQuery.isEmpty || video.title.localizedCaseInsensitiveContains(studioQuery))
         }
         return VStack(alignment: .leading, spacing: 14) {
@@ -1806,7 +1822,8 @@ private struct CreatorHome: View {
                     name = profile.name; about = profile.about; error = ""; editing = true
                 }.font(.footnote).foregroundStyle(lime)
             }
-            Text("Студия автора").font(.custom("DelaGothicOne-Regular", size: 23))
+            Text(studioFilter == "Загрузка и доступ" ? studioFilter : "Студия автора")
+                .font(.custom("DelaGothicOne-Regular", size: 23))
             Text(profile.name + (mine.isEmpty ? "" : " · \(mine.count) видео"))
                 .font(.subheadline).foregroundStyle(.secondary)
             if mine.isEmpty {
@@ -1832,6 +1849,9 @@ private struct CreatorHome: View {
                         }.buttonStyle(.plain)
                     }
                 }
+                Button(studioFilter == "Загрузка и доступ" ? "Вернуться к списку" : "Загрузка и доступ") {
+                    studioFilter = studioFilter == "Загрузка и доступ" ? "Всё" : "Загрузка и доступ"
+                }.font(.caption.weight(.semibold)).foregroundStyle(lime)
                 if shown.isEmpty { Text("Видео не найдено").foregroundStyle(.secondary) }
                 ForEach(shown) { video in
                     HStack {
