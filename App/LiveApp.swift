@@ -106,7 +106,7 @@ struct ChepushkaLiveApp: App {
         }
     }
     var body: some Scene {
-        WindowGroup { Home().environmentObject(auth).preferredColorScheme(.dark).tint(lime).task { await auth.refresh() }.sheet(isPresented: $auth.showLogin) { TelegramSignIn().environmentObject(auth) } }
+        WindowGroup { Home().environmentObject(auth).preferredColorScheme(.dark).tint(lime).task { await auth.refresh() }.sheet(isPresented: $auth.showLogin) { SignInChoices().environmentObject(auth) } }
     }
 }
 
@@ -1556,6 +1556,77 @@ private final class LiveSession: ObservableObject {
     }
 }
 
+private struct SignInChoices: View {
+    @EnvironmentObject private var auth: LiveSession
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                Text("Вход в аккаунт").font(.title2.bold())
+                NavigationLink("Войти через Telegram") { TelegramSignIn() }
+                    .buttonStyle(.borderedProminent).foregroundStyle(appBackground)
+                NavigationLink("Войти по почте") { EmailSignIn() }.buttonStyle(.bordered)
+                Button("Закрыть") { auth.showLogin = false }
+            }
+            .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(appBackground.ignoresSafeArea())
+        }
+    }
+}
+
+private struct EmailSignIn: View {
+    @EnvironmentObject private var auth: LiveSession
+    @State private var email = ""
+    @State private var password = ""
+    @State private var error = ""
+    @State private var busy = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                TextField("Почта", text: $email)
+                    .keyboardType(.emailAddress).textContentType(.username)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .padding(12).creatorField()
+                SecureField("Пароль", text: $password)
+                    .textContentType(.password).submitLabel(.go)
+                    .onSubmit { if canSubmit { Task { await submit() } } }
+                    .padding(12).creatorField()
+                Text("Если аккаунта ещё нет, он будет создан. Код на почту не отправляется.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                creatorButton(busy ? "Входим…" : "Продолжить") { Task { await submit() } }
+                    .disabled(!canSubmit)
+                if !error.isEmpty { Text(error).font(.footnote).foregroundStyle(.red) }
+            }.padding(24)
+        }
+        .background(appBackground.ignoresSafeArea())
+        .navigationTitle("Вход по почте").navigationBarTitleDisplayMode(.inline)
+        .interactiveDismissDisabled(busy)
+    }
+
+    private var canSubmit: Bool {
+        !busy && email.contains("@") && (8...256).contains(password.count)
+    }
+
+    @MainActor
+    private func submit() async {
+        guard canSubmit else { return }
+        busy = true
+        error = ""
+        defer { busy = false }
+        do {
+            let _: WriteResult = try await request("/api/auth/email/continue", method: "POST",
+                json: ["email": email.trimmingCharacters(in: .whitespacesAndNewlines), "password": password])
+            await auth.refresh()
+            guard auth.account != nil else { throw URLError(.userAuthenticationRequired) }
+            password = ""
+            auth.showLogin = false
+        } catch let failure as ServerError where failure.status == 401 {
+            error = "Почта или пароль неверны."
+        } catch { self.error = error.localizedDescription }
+    }
+}
+
 private struct TelegramSignIn: View {
     struct Ticket: Decodable { let session_id, poll_token, code: String; let url: URL; let expires_in: Int }
     struct Poll: Decodable { let status: String }
@@ -1746,7 +1817,7 @@ private struct CreatorHome: View {
                     Text("Создайте канал, чтобы публиковать видео.").foregroundStyle(.secondary)
                     Button("Создать канал") { auth.showLogin = true }.buttonStyle(.borderedProminent)
                 } else if auth.account?.can_publish == false {
-                    Button("Создать канал через Telegram") { auth.showLogin = true }.buttonStyle(.borderedProminent)
+                    Button("Создать канал") { auth.showLogin = true }.buttonStyle(.borderedProminent)
                 } else if error.isEmpty {
                     ProgressView()
                 } else {
