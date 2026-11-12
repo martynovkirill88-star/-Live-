@@ -1308,11 +1308,20 @@ private struct PublishVideo: View {
     @State private var status = ""
     @State private var transfer: Transfer?
     @State private var submitted = false
+    @EnvironmentObject private var auth: LiveSession
+    @State private var linkAvailable = false
+    @State private var videoLink = ""
+    @State private var linkPreview: LinkPreview?
+    private let sourceEndpoint = "/api/admin/publication-source"
+    private struct SourceCapability: Decodable { let available: Bool }
+    private struct LinkPreview: Decodable { let title, description: String; let thumbnail: URL }
+    private struct ImportJob: Decodable { let status: String; let error: String? }
+    private var hasVideo: Bool { file != nil || linkPreview != nil }
 
     var body: some View {
         VStack(spacing: 0) {
-            creatorHeader("Новое видео", icon: file == nil ? "xmark" : "chevron.left", disabled: busy || importing) {
-                if file == nil || submitted { clearMovie(); dismiss() }
+            creatorHeader("Новое видео", icon: !hasVideo ? "xmark" : "chevron.left", disabled: busy || importing) {
+                if !hasVideo || submitted { clearMovie(); dismiss() }
                 else {
                     clearMovie()
                     selection = nil
@@ -1327,20 +1336,22 @@ private struct PublishVideo: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        Text(file == nil ? "01 / ВЫБОР ВИДЕО" : "02 / ОФОРМЛЕНИЕ")
+                        Text(!hasVideo ? "01 / ВЫБОР ВИДЕО" : "02 / ОФОРМЛЕНИЕ")
                             .font(.caption2.bold()).foregroundStyle(lime)
                         HStack(spacing: 8) {
                             Capsule().fill(lime).frame(height: 2)
-                            Capsule().fill(file == nil ? surface : lime).frame(height: 2)
+                            Capsule().fill(!hasVideo ? surface : lime).frame(height: 2)
                         }
-                        if let file { details(file) } else { picker }
+                        if hasVideo { details(file?.lastPathComponent ?? "YouTube") } else { picker }
                         if !status.isEmpty { Text(status).font(.caption) }
                     }.padding(16)
                 }
                 Divider()
-                if let file {
+                if hasVideo {
                     creatorButton(submitted ? "Готово" : "Опубликовать") {
-                        if submitted { clearMovie(); dismiss() } else { Task { await upload(file) } }
+                        if submitted { clearMovie(); dismiss() }
+                        else if let file { Task { await upload(file) } }
+                        else { Task { await publishLink() } }
                     }.disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .padding(16)
                 } else {
@@ -1353,6 +1364,12 @@ private struct PublishVideo: View {
         }
         .background(appBackground.ignoresSafeArea())
         .interactiveDismissDisabled(busy || importing)
+        .task(id: auth.account?.role) {
+            linkAvailable = false
+            guard auth.account?.role == "admin" else { return }
+            let capability: SourceCapability? = try? await request(sourceEndpoint)
+            if !Task.isCancelled { linkAvailable = capability?.available == true }
+        }
         .task(id: selection) {
             guard let selection else { return }
             importing = true
@@ -1407,6 +1424,13 @@ private struct PublishVideo: View {
             }.frame(maxWidth: .infinity).padding(.vertical, 26)
                 .background(creatorSurface, in: RoundedRectangle(cornerRadius: 16))
                 .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(lime.opacity(0.22), style: StrokeStyle(dash: [5, 5])))
+            if linkAvailable {
+                TextField("Ссылка на YouTube", text: $videoLink)
+                    .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .padding(12).creatorField().disabled(importing)
+                creatorButton("Далее") { Task { await loadLink() } }
+                    .disabled(importing || videoLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Публикация на канале").font(.caption2).foregroundStyle(.secondary)
                 Text(channel).font(.subheadline.weight(.semibold))
@@ -1417,13 +1441,13 @@ private struct PublishVideo: View {
         }
     }
 
-    private func details(_ file: URL) -> some View {
+    private func details(_ filename: String) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Image(systemName: "doc")
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(file.lastPathComponent).lineLimit(1)
-                    Text(submitted ? "Отправлено на модерацию" : "Видео выбрано")
+                    Text(filename).lineLimit(1)
+                    Text(submitted ? (linkPreview == nil ? "Отправлено на модерацию" : "Передано на обработку") : "Видео выбрано")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1444,6 +1468,10 @@ private struct PublishVideo: View {
                 HStack(spacing: 12) {
                     Group {
                         if let coverPreview { Image(uiImage: coverPreview).resizable().scaledToFill() }
+                        else if let linkPreview {
+                            AsyncImage(url: linkPreview.thumbnail) { image in image.resizable().scaledToFill() }
+                                placeholder: { surface.overlay(Image(systemName: "photo")) }
+                        }
                         else { surface.overlay(Image(systemName: "photo")) }
                     }.frame(width: 136, height: 76).clipShape(RoundedRectangle(cornerRadius: 9))
                     VStack(alignment: .leading, spacing: 5) {
@@ -1514,6 +1542,51 @@ private struct PublishVideo: View {
     private func clearMovie() {
         if let file { try? FileManager.default.removeItem(at: file) }
         file = nil
+        linkPreview = nil
+        coverPreview = nil
+    }
+
+    private func loadLink() async {
+        guard !importing else { return }
+        importing = true
+        status = "Получаем сведения о видео…"
+        defer { importing = false }
+        do {
+            let preview: LinkPreview = try await request(sourceEndpoint + "/preview", method: "POST",
+                json: ["url": videoLink], headers: ["X-Live-Publication": "1"])
+            title = preview.title
+            description = preview.description
+            linkPreview = preview
+            status = ""
+        } catch { status = error.localizedDescription }
+    }
+
+    private func publishLink() async {
+        busy = true
+        status = ""
+        uploadPhase = "Сервер скачивает видео…"
+        progress = 0
+        defer { busy = false }
+        do {
+            var settings: [String: Any] = [
+                "url": videoLink, "title": title, "description": description,
+                "publication_policy": privateVideo ? "private" : "public",
+                "comments_enabled": commentsEnabled, "category": category.rawValue
+            ]
+            if scheduled && !privateVideo { settings["publish_at"] = publishDate.timeIntervalSince1970 }
+            if let cover { settings["cover"] = try await jpegImage(cover, maximum: 1280).base64EncodedString() }
+            var job: ImportJob = try await request(sourceEndpoint + "/publish", method: "POST",
+                json: settings, headers: ["X-Live-Publication": "1"])
+            while job.status == "downloading" {
+                try await Task.sleep(for: .seconds(2))
+                job = try await request(sourceEndpoint + "/status")
+            }
+            guard job.status == "queued" else {
+                throw ServerError(status: 502, message: job.error ?? "Импорт был прерван.")
+            }
+            submitted = true
+            status = "Видео передано в очередь обработки."
+        } catch { status = error.localizedDescription }
     }
 
     private func upload(_ file: URL) async {
