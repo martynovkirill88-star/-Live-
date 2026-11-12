@@ -4,6 +4,8 @@ import CoreText
 import UniformTypeIdentifiers
 import PhotosUI
 import CoreTransferable
+import Speech
+import AVFoundation
 
 private let appBackground = Color(red: 0.047, green: 0.071, blue: 0.067)
 private let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
@@ -134,15 +136,12 @@ private struct Home: View {
     private let dockTabs = ["Главная", "Эфиры", "Подписки", "Профиль"]
     @State private var filter = "Всё"
     @State private var search = false
-    @State private var query = ""
-    @FocusState private var searchFocused: Bool
     @State private var path: [Route] = []
     @AppStorage("followedChannels") private var followed = ""
     @AppStorage("savedVideos") private var saved = ""
     private var visible: [Video] {
         let filtered = videos.filter { video in
             let title = video.title + " " + (video.description ?? "")
-            if !query.isEmpty && !title.localizedCaseInsensitiveContains(query) { return false }
             switch tab {
             case "Эфиры": return video.live
             case "Подписки": return followed.split(separator: ",").contains { String($0) == video.channel_id }
@@ -158,7 +157,7 @@ private struct Home: View {
                 }
             }
         }
-        if tab == "Главная" && filter == "Всё" && query.isEmpty {
+        if tab == "Главная" && filter == "Всё" {
             return LocalDiscovery.rank(filtered, saved: Set(saved.split(separator: ",").map(String.init)), followed: Set(followed.split(separator: ",").map(String.init)))
         }
         return filtered
@@ -176,31 +175,8 @@ private struct Home: View {
                     if auth.account?.role == "admin" {
                         headerButton("gearshape", label: "Админ-панель") { ownerConsole = true }
                     }
-                    headerButton(search ? "xmark" : "magnifyingglass", label: search ? "Закрыть поиск" : "Поиск") {
-                        search.toggle()
-                        if !search { query = ""; searchFocused = false }
-                    }
+                    headerButton("magnifyingglass", label: "Поиск") { search = true }
                 }.padding(.horizontal, 16)
-                if search {
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Поиск видео", text: $query)
-                            .focused($searchFocused)
-                            .submitLabel(.search)
-                            .onSubmit { searchFocused = false }
-                        if !query.isEmpty {
-                            Button { query = "" } label: {
-                                Image(systemName: "xmark.circle.fill").frame(minWidth: 44, minHeight: 44)
-                            }.buttonStyle(.plain).accessibilityLabel("Очистить поиск")
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .frame(minHeight: 46)
-                    .chromeCapsule()
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .task { searchFocused = true }
-                }
                 if tab == "Профиль" { CreatorHome() } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -253,6 +229,7 @@ private struct Home: View {
             }
             .task { await load() }
             .sheet(isPresented: $ownerConsole) { OwnerConsoleSheet() }
+            .fullScreenCover(isPresented: $search) { CatalogSearch(videos: videos) }
         }
     }
 
@@ -295,9 +272,6 @@ private struct Home: View {
 
     private func selectTab(_ title: String) {
         tab = title
-        query = ""
-        search = false
-        searchFocused = false
     }
 
     @ViewBuilder
@@ -333,6 +307,241 @@ private struct Home: View {
         failure = false
         do { let catalog: Catalog = try await request("/api/catalog"); videos = catalog.items }
         catch { failure = true }
+    }
+}
+
+private struct CatalogSearch: View {
+    let videos: [Video]
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @FocusState private var focused: Bool
+    @StateObject private var voice = LocalSearchSpeech()
+    @State private var query = ""
+    @State private var submitted: String?
+    @AppStorage("catalogSearchCounts") private var storedCounts = Data()
+
+    private func normalized(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "ru"))
+    }
+
+    private var counts: [String: Int] {
+        (try? JSONDecoder().decode([String: Int].self, from: storedCounts)) ?? [:]
+    }
+
+    private var suggestions: [String] {
+        let term = normalized(query)
+        let counts = counts
+        var titles: [String: Video] = [:]
+        for video in videos {
+            let key = normalized(video.title)
+            guard !key.isEmpty, term.isEmpty || key.contains(term) else { continue }
+            if titles[key] == nil || (video.views ?? 0) > (titles[key]?.views ?? 0) { titles[key] = video }
+        }
+        return titles.values.sorted { a, b in
+            let left = normalized(a.title), right = normalized(b.title)
+            let leftPrefix = left.hasPrefix(term), rightPrefix = right.hasPrefix(term)
+            if leftPrefix != rightPrefix { return leftPrefix }
+            if counts[left, default: 0] != counts[right, default: 0] {
+                return counts[left, default: 0] > counts[right, default: 0]
+            }
+            if (a.views ?? 0) != (b.views ?? 0) { return (a.views ?? 0) > (b.views ?? 0) }
+            return left < right
+        }.prefix(8).map(\.title)
+    }
+
+    private func results(_ term: String) -> [Video] {
+        let key = normalized(term)
+        return videos.filter { video in
+            normalized(video.title + " " + video.channel + " " + (video.description ?? "")).contains(key)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "chevron.left").frame(width: 44, height: 44).chromeCapsule()
+                    }.buttonStyle(.plain).accessibilityLabel("Назад")
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Поиск видео", text: $query)
+                            .focused($focused).submitLabel(.search)
+                            .onSubmit { submit(query) }
+                        if !query.isEmpty {
+                            Button { voice.stop(); query = ""; submitted = nil; focused = true } label: {
+                                Image(systemName: "xmark.circle.fill").frame(width: 34, height: 44)
+                            }.buttonStyle(.plain).accessibilityLabel("Очистить поиск")
+                        }
+                    }.padding(.leading, 12).padding(.trailing, 6).frame(minHeight: 46).chromeCapsule()
+                    Button {
+                        if voice.active { voice.stop(); return }
+                        focused = false
+                        submitted = nil
+                        voice.start(hints: suggestions) { query = $0 }
+                    } label: {
+                        Image(systemName: voice.active ? "stop.fill" : "mic.fill")
+                            .foregroundStyle(voice.active ? lime : .white)
+                            .frame(width: 46, height: 46).chromeCapsule()
+                    }.buttonStyle(.plain)
+                        .accessibilityLabel(voice.active ? "Остановить запись" : "Голосовой поиск")
+                }.padding(.horizontal, 16)
+                if !normalized(query).isEmpty, normalized(query) != normalized(submitted ?? "") {
+                    Button("Найти") { submit(query) }
+                        .buttonStyle(.borderedProminent)
+                        .foregroundStyle(appBackground)
+                        .padding(.horizontal, 16)
+                }
+                if voice.active || !voice.message.isEmpty {
+                    Text(voice.active ? "Слушаю…" : voice.message).font(.footnote)
+                        .foregroundStyle(.secondary).padding(.horizontal, 16)
+                }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if let submitted, normalized(query) == normalized(submitted) {
+                            let matches = results(submitted)
+                            Text(matches.isEmpty ? "Ничего не найдено" : "Результаты").font(.headline)
+                            ForEach(matches) { video in
+                                NavigationLink(value: video) { FeedCard(video: video) }.buttonStyle(.plain)
+                            }
+                        } else {
+                            if !suggestions.isEmpty {
+                                Text(query.isEmpty ? "Популярное в каталоге" : "Подсказки").font(.headline)
+                            }
+                            ForEach(suggestions, id: \.self) { title in
+                                Button { submit(title) } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                                        Text(title).lineLimit(2)
+                                        Spacer()
+                                        Image(systemName: "arrow.up.left").foregroundStyle(.secondary)
+                                    }.frame(minHeight: 44).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }.padding(16)
+                }.scrollDismissesKeyboard(.interactively)
+            }
+            .padding(.top, 8)
+            .background(appBackground.ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: Video.self) { video in
+                Watch(video: video, others: videos.filter { $0.id != video.id })
+            }
+            .task { focused = true }
+        }
+        .onDisappear { voice.stop() }
+        .onChange(of: scenePhase) { phase in if phase == .background { voice.stop() } }
+    }
+
+    private func submit(_ text: String) {
+        let key = normalized(text)
+        guard !key.isEmpty else { return }
+        voice.stop()
+        focused = false
+        query = text
+        submitted = text
+        var history = counts
+        if history.count >= 100 && history[key] == nil,
+           let leastUsed = history.min(by: { $0.value < $1.value })?.key {
+            history.removeValue(forKey: leastUsed)
+        }
+        history[key, default: 0] += 1
+        if let encoded = try? JSONEncoder().encode(history) { storedCounts = encoded }
+    }
+}
+
+@MainActor
+private final class LocalSearchSpeech: ObservableObject {
+    @Published private(set) var active = false
+    @Published private(set) var message = ""
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "ru-RU"))
+    private let engine = AVAudioEngine()
+    private var task: SFSpeechRecognitionTask?
+    private var timeout: Task<Void, Never>?
+    private var generation = UUID()
+    private var hasTap = false
+    private var audioActive = false
+
+    func start(hints: [String], onText: @escaping (String) -> Void) {
+        guard !active else { return }
+        guard let recognizer, recognizer.supportsOnDeviceRecognition else {
+            message = "Локальное распознавание русского языка недоступно на этом iPhone."
+            return
+        }
+        message = ""
+        active = true
+        let id = generation
+        Task {
+            let speech: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+            }
+            guard id == generation else { return }
+            guard speech == .authorized else { fail("Разреши распознавание речи в настройках iPhone."); return }
+            let microphone: Bool = await withCheckedContinuation { continuation in
+                AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) }
+            }
+            guard id == generation else { return }
+            guard microphone else { fail("Разреши доступ к микрофону в настройках iPhone."); return }
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.record, mode: .measurement)
+                try session.setActive(true)
+                audioActive = true
+                let input = engine.inputNode
+                let format = input.outputFormat(forBus: 0)
+                guard format.channelCount > 0, format.sampleRate > 0 else {
+                    fail("Микрофон сейчас недоступен.")
+                    return
+                }
+                let request = SFSpeechAudioBufferRecognitionRequest()
+                request.requiresOnDeviceRecognition = true
+                request.shouldReportPartialResults = true
+                request.contextualStrings = hints
+                input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in request.append(buffer) }
+                hasTap = true
+                engine.prepare()
+                try engine.start()
+                task = recognizer.recognitionTask(with: request) { result, error in
+                    let text = result?.bestTranscription.formattedString
+                    let final = result?.isFinal == true
+                    let failed = error != nil
+                    Task { @MainActor in
+                        guard id == self.generation else { return }
+                        if let text, !text.isEmpty { onText(text) }
+                        if final { self.stop() }
+                        else if failed { self.fail("Не удалось распознать речь. Попробуй ещё раз.") }
+                    }
+                }
+                timeout = Task {
+                    try? await Task.sleep(for: .seconds(15))
+                    if !Task.isCancelled, id == generation { stop() }
+                }
+            } catch { fail("Не удалось включить микрофон.") }
+        }
+    }
+
+    private func fail(_ text: String) {
+        stop()
+        message = text
+    }
+
+    func stop() {
+        generation = UUID()
+        timeout?.cancel()
+        timeout = nil
+        task?.cancel()
+        task = nil
+        if engine.isRunning { engine.stop() }
+        if hasTap { engine.inputNode.removeTap(onBus: 0); hasTap = false }
+        if audioActive {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            try? session.setCategory(.playback)
+            audioActive = false
+        }
+        active = false
     }
 }
 
