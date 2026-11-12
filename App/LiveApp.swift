@@ -1392,10 +1392,14 @@ private struct PublishVideo: View {
     private var uploadProgress: some View {
         VStack(spacing: 18) {
             Image(systemName: "arrow.up.circle").font(.system(size: 54)).foregroundStyle(lime)
-            Text("Загрузка видео").font(.title2.bold())
+            Text(linkPreview == nil ? "Загрузка видео" : "Импорт видео").font(.title2.bold())
             Text(title).font(.subheadline).lineLimit(2).foregroundStyle(.secondary)
-            ProgressView(value: progress).tint(lime)
-            Text(progress.formatted(.percent.precision(.fractionLength(0)))).monospacedDigit()
+            if linkPreview == nil {
+                ProgressView(value: progress).tint(lime)
+                Text(progress.formatted(.percent.precision(.fractionLength(0)))).monospacedDigit()
+            } else {
+                ProgressView().tint(lime)
+            }
             Text(uploadPhase).font(.subheadline).foregroundStyle(.secondary)
         }.multilineTextAlignment(.center).padding(30)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
