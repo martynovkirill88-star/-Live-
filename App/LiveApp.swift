@@ -129,6 +129,10 @@ private struct Home: View {
     @State private var videos: [Video] = []
     @State private var failure = false
     @State private var tab = "Главная"
+    @GestureState private var dockDragIndex: Int?
+    @Namespace private var dockSelection
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let dockTabs = ["Главная", "Эфиры", "Подписки", "Профиль"]
     @State private var filter = "Всё"
     @State private var search = false
     @State private var query = ""
@@ -233,12 +237,7 @@ private struct Home: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                HStack(spacing: 2) {
-                    tabButton("Главная", "house")
-                    tabButton("Эфиры", "dot.radiowaves.left.and.right")
-                    tabButton("Подписки", "play.rectangle.on.rectangle")
-                    tabButton("Профиль", "person.crop.circle")
-                }
+                dock
                 .padding(5)
                 .chromeCapsule()
                 .frame(maxWidth: 500)
@@ -258,6 +257,39 @@ private struct Home: View {
         }
     }
 
+    private var dock: some View {
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                tabButton("Главная", "house")
+                tabButton("Эфиры", "dot.radiowaves.left.and.right")
+                tabButton("Подписки", "play.rectangle.on.rectangle")
+                tabButton("Профиль", "person.crop.circle")
+            }
+            .coordinateSpace(name: "tab-dock")
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8, coordinateSpace: .named("tab-dock"))
+                    .updating($dockDragIndex) { value, index, _ in
+                        index = dockIndex(at: value.location.x, width: geometry.size.width)
+                    }
+                    .onEnded { value in
+                        selectTab(dockTabs[dockIndex(at: value.location.x, width: geometry.size.width)])
+                    }
+            )
+        }.frame(height: 48)
+    }
+
+    private func dockIndex(at x: CGFloat, width: CGFloat) -> Int {
+        guard width > 0 else { return 0 }
+        return Int(min(CGFloat(dockTabs.count - 1), max(0, x / width * CGFloat(dockTabs.count))))
+    }
+
+    private func selectTab(_ title: String) {
+        tab = title
+        query = ""
+        search = false
+        searchFocused = false
+    }
+
     @ViewBuilder
     private func headerButton(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
         let button = Button(action: action) {
@@ -273,18 +305,25 @@ private struct Home: View {
     }
 
     private func tabButton(_ title: String, _ icon: String) -> some View {
-        Button { tab = title; query = ""; search = false } label: {
+        let highlighted = (dockDragIndex.map { dockTabs[$0] } ?? tab) == title
+        return Button { selectTab(title) } label: {
             VStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 20))
                 Text(title).font(.caption2.weight(tab == title ? .semibold : .regular))
                     .lineLimit(1).minimumScaleFactor(0.8)
             }.frame(maxWidth: .infinity, minHeight: 44)
                 .padding(.vertical, 2)
-                .background(tab == title ? lime.opacity(0.15) : .clear, in: Capsule())
+                .background {
+                    if highlighted {
+                        Capsule().fill(lime.opacity(0.15))
+                            .matchedGeometryEffect(id: "dock-selection", in: dockSelection)
+                    }
+                }
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(tab == title ? lime : .secondary)
+        .foregroundStyle(highlighted ? lime : .secondary)
+        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.8), value: highlighted)
         .accessibilityAddTraits(tab == title ? .isSelected : [])
     }
 
