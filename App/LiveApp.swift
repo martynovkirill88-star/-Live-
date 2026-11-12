@@ -66,12 +66,12 @@ private struct ServerError: LocalizedError {
 
 private func request<T: Decodable>(
     _ path: String, method: String = "GET", json: [String: Any]? = nil,
-    bytes: Data? = nil, headers: [String: String] = [:]
+    bytes: Data? = nil, headers: [String: String] = [:], timeout: TimeInterval = 60
 ) async throws -> T {
     guard let url = remote(path) else { throw URLError(.badURL) }
     var call = URLRequest(url: url)
     call.httpMethod = method
-    call.timeoutInterval = 60
+    call.timeoutInterval = timeout
     if let json {
         call.httpBody = try JSONSerialization.data(withJSONObject: json)
         call.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -127,7 +127,11 @@ private struct Artwork: View {
 
 private struct Home: View {
     @EnvironmentObject private var auth: LiveSession
+    @Environment(\.scenePhase) private var scenePhase
     @State private var ownerConsole = false
+    @State private var settings = false
+    @State private var openOwnerAfterSettings = false
+    @State private var history = false
     @State private var videos: [Video] = []
     @State private var failure = false
     @State private var tab = "Главная"
@@ -172,9 +176,7 @@ private struct Home: View {
                         .accessibilityHidden(true)
                     Text("Чепушка Live").font(.custom("DelaGothicOne-Regular", size: 17))
                     Spacer()
-                    if auth.account?.role == "admin" {
-                        headerButton("gearshape", label: "Админ-панель") { ownerConsole = true }
-                    }
+                    headerButton("gearshape", label: "Настройки") { settings = true }
                     headerButton("magnifyingglass", label: "Поиск") { search = true }
                 }.padding(.horizontal, 16)
                 if tab == "Профиль" { CreatorHome() } else {
@@ -192,6 +194,13 @@ private struct Home: View {
                                         }
                                     }
                                 }
+                            }
+                            if !auth.watchHistory.isEmpty {
+                                Button { history = true } label: {
+                                    Label("Продолжить просмотр", systemImage: "clock.arrow.circlepath")
+                                        .font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(12).chromeCapsule()
+                                }.buttonStyle(.plain)
                             }
                         }
                         Text(tab == "Главная" ? "Для вас" : tab == "Профиль" ? "Сохранённое" : tab)
@@ -229,6 +238,21 @@ private struct Home: View {
             }
             .task { await load() }
             .sheet(isPresented: $ownerConsole) { OwnerConsoleSheet() }
+            .sheet(isPresented: $settings, onDismiss: {
+                if openOwnerAfterSettings { openOwnerAfterSettings = false; ownerConsole = true }
+            }) {
+                AccountSettings(openOwner: {
+                    openOwnerAfterSettings = true
+                    settings = false
+                })
+            }
+            .sheet(isPresented: $history) { ContinueWatching() }
+            .onChange(of: path.isEmpty) { empty in
+                if empty { Task { await auth.refreshWatchHistory() } }
+            }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { Task { await auth.refreshWatchHistory() } }
+            }
             .fullScreenCover(isPresented: $search) { CatalogSearch(videos: videos) }
         }
     }
@@ -307,6 +331,88 @@ private struct Home: View {
         failure = false
         do { let catalog: Catalog = try await request("/api/catalog"); videos = catalog.items }
         catch { failure = true }
+    }
+}
+
+private struct WatchCheckpoint: Decodable, Identifiable {
+    let video: Video
+    let position: Double
+    var id: String { video.id }
+}
+
+private struct WatchHistoryResponse: Decodable { let items: [WatchCheckpoint] }
+private struct ResumePosition: Decodable { let position: Double }
+
+private struct ContinueWatching: View {
+    @EnvironmentObject private var auth: LiveSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if auth.watchHistory.isEmpty { Text("Недосмотренных видео пока нет.").foregroundStyle(.secondary) }
+                    ForEach(auth.watchHistory) { item in
+                        NavigationLink(value: item.video) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                FeedCard(video: item.video)
+                                ProgressView(value: min(1, item.position / max(1, item.video.duration ?? item.position)))
+                                Text("Продолжить с \(clock(item.position))").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }.buttonStyle(.plain)
+                    }
+                }.padding(16)
+            }
+            .background(appBackground.ignoresSafeArea())
+            .navigationTitle("Продолжить просмотр")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
+            .navigationDestination(for: Video.self) { video in
+                Watch(video: video, others: auth.watchHistory.map(\.video).filter { $0.id != video.id })
+            }
+            .task { await auth.refreshWatchHistory() }
+        }
+    }
+}
+
+private struct AccountSettings: View {
+    @EnvironmentObject private var auth: LiveSession
+    @Environment(\.dismiss) private var dismiss
+    let openOwner: () -> Void
+    @State private var busy = false
+    @State private var error = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let account = auth.account {
+                    Section(account.name) {
+                        Button("Выйти из аккаунта", role: .destructive) {
+                            busy = true
+                            Task {
+                                defer { busy = false }
+                                do { try await auth.signOut(); dismiss() }
+                                catch { self.error = error.localizedDescription }
+                            }
+                        }.disabled(busy)
+                        if account.role == "admin" {
+                            Button("Админ-панель Чепушка Live") {
+                                openOwner()
+                            }.disabled(busy)
+                        }
+                    }
+                } else {
+                    Button("Войти в аккаунт") {
+                        dismiss()
+                        Task { @MainActor in auth.showLogin = true }
+                    }
+                }
+                if !error.isEmpty { Text(error).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("Настройки")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
+        }
     }
 }
 
@@ -1213,6 +1319,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         config.allowsPictureInPictureMediaPlayback = false
         config.userContentController.add(context.coordinator, name: "playerOrientation")
         config.userContentController.add(context.coordinator, name: "playerWatched")
+        config.userContentController.add(context.coordinator, name: "playerProgress")
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -1263,6 +1370,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         coordinator.player?.evaluateJavaScript("window.activePlayer?.destroy()", completionHandler: nil)
         coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerOrientation")
         coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerWatched")
+        coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerProgress")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -1282,6 +1390,13 @@ private struct WebsitePlayer: UIViewRepresentable {
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame else { return }
             if message.name == "playerWatched" { LocalDiscovery.record(video.id); return }
+            if message.name == "playerProgress" {
+                guard !video.live, let data = message.body as? [String: Any],
+                      HTTPCookieStorage.shared.cookies(for: origin)?.contains(where: { $0.name == "live_viewer_identity" || $0.name == "live_session" }) == true else { return }
+                let endpoint = "/api/watch-history/" + video.id
+                Task { let _: WriteResult? = try? await request(endpoint, method: "POST", json: data) }
+                return
+            }
             if fullscreen != nil { closeFullscreen(); return }
             guard let presenter = host?.window?.rootViewController else { return }
             var top = presenter
@@ -1328,7 +1443,7 @@ private struct WebsitePlayer: UIViewRepresentable {
                 webView.evaluateJavaScript("document.getElementById('player').textContent='Видео пока недоступно';document.body.style.color='white';", completionHandler: nil)
                 return
             }
-            let item: [String: Any] = [
+            var item: [String: Any] = [
                 "id": video.id,
                 "manifest": manifest.absoluteString,
                 "poster": remote(video.poster)?.absoluteString ?? "",
@@ -1337,10 +1452,18 @@ private struct WebsitePlayer: UIViewRepresentable {
                 "duration": video.duration ?? 0,
                 "qualities": (video.qualities ?? []).map { ["code": $0.code, "height": $0.height] as [String: Any] }
             ]
-            webView.callAsyncJavaScript("window.mountBundledPlayer(item)", arguments: ["item": item],
+            Task { @MainActor in
+                if !video.live,
+                   HTTPCookieStorage.shared.cookies(for: origin)?.contains(where: { $0.name == "live_viewer_identity" || $0.name == "live_session" }) == true {
+                    let resume: ResumePosition? = try? await request("/api/watch-history/" + video.id, timeout: 3)
+                    item["resume"] = resume?.position ?? 0
+                }
+                guard self.player === webView else { return }
+                webView.callAsyncJavaScript("window.mountBundledPlayer(item)", arguments: ["item": item],
                                         in: nil, in: .page) { result in
                 if case .failure = result {
                     webView.evaluateJavaScript("document.getElementById('player').textContent='Не удалось запустить плеер';document.body.style.color='white';", completionHandler: nil)
+                }
                 }
             }
         }
@@ -1377,6 +1500,7 @@ private final class LiveSession: ObservableObject {
     @Published var account: Account?
     @Published var showLogin = false
     @Published private(set) var ownedChannelID: String?
+    @Published private(set) var watchHistory: [WatchCheckpoint] = []
     private struct OwnerProfile: Decodable { let id: String }
     func refresh() async {
         guard let response: Response = try? await request("/api/session") else { return }
@@ -1387,6 +1511,28 @@ private final class LiveSession: ObservableObject {
         } else {
             ownedChannelID = nil
         }
+        await refreshWatchHistory()
+    }
+
+    func refreshWatchHistory() async {
+        guard account != nil else { watchHistory = []; return }
+        if let result: WatchHistoryResponse = try? await request("/api/watch-history"), account != nil {
+            watchHistory = result.items
+        }
+    }
+
+    func signOut() async throws {
+        let _: WriteResult = try await request("/api/auth/logout", method: "POST")
+        for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] {
+            HTTPCookieStorage.shared.deleteCookie(cookie)
+        }
+        let webCookies = WKWebsiteDataStore.default().httpCookieStore
+        for cookie in await webCookies.allCookies() where cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")) == origin.host {
+            await webCookies.deleteCookie(cookie)
+        }
+        account = nil
+        ownedChannelID = nil
+        watchHistory = []
     }
 
     func setOwnedChannel(_ id: String) {
