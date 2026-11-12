@@ -132,6 +132,7 @@ private struct Home: View {
     @State private var filter = "Всё"
     @State private var search = false
     @State private var query = ""
+    @FocusState private var searchFocused: Bool
     @State private var path: [Route] = []
     @AppStorage("followedChannels") private var followed = ""
     @AppStorage("savedVideos") private var saved = ""
@@ -170,16 +171,32 @@ private struct Home: View {
                     Text("Чепушка Live").font(.custom("DelaGothicOne-Regular", size: 17))
                     Spacer()
                     if auth.account?.role == "admin" {
-                        Button { ownerConsole = true } label: {
-                            Image(systemName: "gearshape").frame(width: 44, height: 44)
-                        }.accessibilityLabel("Админ-панель")
+                        headerButton("gearshape", label: "Админ-панель") { ownerConsole = true }
                     }
-                    Button { search.toggle(); if !search { query = "" } } label: {
-                        Image(systemName: "magnifyingglass").frame(width: 44, height: 44)
-                    }.accessibilityLabel("Поиск")
+                    headerButton(search ? "xmark" : "magnifyingglass", label: search ? "Закрыть поиск" : "Поиск") {
+                        search.toggle()
+                        if !search { query = ""; searchFocused = false }
+                    }
                 }.padding(.horizontal, 16)
                 if search {
-                    TextField("Поиск видео", text: $query).textFieldStyle(.roundedBorder).padding(16)
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Поиск видео", text: $query)
+                            .focused($searchFocused)
+                            .submitLabel(.search)
+                            .onSubmit { searchFocused = false }
+                        if !query.isEmpty {
+                            Button { query = "" } label: {
+                                Image(systemName: "xmark.circle.fill").frame(minWidth: 44, minHeight: 44)
+                            }.buttonStyle(.plain).accessibilityLabel("Очистить поиск")
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: 46)
+                    .chromeCapsule()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .task { searchFocused = true }
                 }
                 if tab == "Профиль" { CreatorHome() } else {
                 ScrollView {
@@ -214,12 +231,19 @@ private struct Home: View {
                     }.padding(16)
                 }.refreshable { await load() }
                 }
-                HStack {
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                HStack(spacing: 2) {
                     tabButton("Главная", "house")
                     tabButton("Эфиры", "dot.radiowaves.left.and.right")
                     tabButton("Подписки", "play.rectangle.on.rectangle")
                     tabButton("Профиль", "person.crop.circle")
-                }.padding(.vertical, 8).background(surface)
+                }
+                .padding(5)
+                .chromeCapsule()
+                .frame(maxWidth: 500)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 4)
             }
             .background(appBackground.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
@@ -234,19 +258,52 @@ private struct Home: View {
         }
     }
 
+    @ViewBuilder
+    private func headerButton(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
+        let button = Button(action: action) {
+            Image(systemName: icon).font(.system(size: 17, weight: .semibold))
+                .frame(width: 28, height: 28)
+        }.accessibilityLabel(label)
+        if #available(iOS 26.0, *) {
+            button.buttonStyle(.glass).buttonBorderShape(.circle).tint(.white)
+                .frame(minWidth: 44, minHeight: 44)
+        } else {
+            button.buttonStyle(.plain).frame(width: 44, height: 44).chromeCapsule()
+        }
+    }
+
     private func tabButton(_ title: String, _ icon: String) -> some View {
         Button { tab = title; query = ""; search = false } label: {
             VStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 20))
-                Text(title).font(.caption2)
+                Text(title).font(.caption2.weight(tab == title ? .semibold : .regular))
+                    .lineLimit(1).minimumScaleFactor(0.8)
             }.frame(maxWidth: .infinity, minHeight: 44)
-        }.foregroundStyle(tab == title ? lime : .secondary)
+                .padding(.vertical, 2)
+                .background(tab == title ? lime.opacity(0.15) : .clear, in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(tab == title ? lime : .secondary)
+        .accessibilityAddTraits(tab == title ? .isSelected : [])
     }
 
     private func load() async {
         failure = false
         do { let catalog: Catalog = try await request("/api/catalog"); videos = catalog.items }
         catch { failure = true }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func chromeCapsule() -> some View {
+        if #available(iOS 26.0, *) {
+            glassEffect(.regular, in: Capsule())
+        } else {
+            background(.regularMaterial, in: Capsule())
+                .overlay { Capsule().strokeBorder(.white.opacity(0.12)).allowsHitTesting(false) }
+        }
     }
 }
 
