@@ -401,7 +401,7 @@ private struct CatalogSearch: View {
             }.buttonStyle(.plain).accessibilityLabel("Назад")
             HStack(spacing: 8) {
                 if query.isEmpty { Image(systemName: "magnifyingglass").foregroundStyle(muted) }
-                TextField("Видео, каналы, эфиры", text: $query, prompt: Text("Видео, каналы, эфиры").foregroundStyle(muted))
+                TextField("Видео, каналы, эфиры", text: $query, prompt: Text("Видео, каналы, эфиры").foregroundColor(muted))
                     .font(.system(size: 13)).focused($focused).submitLabel(.search)
                     .onSubmit { submit(query) }
                 if !query.isEmpty {
