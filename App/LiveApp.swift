@@ -35,6 +35,10 @@ private struct Video: Decodable, Identifiable, Hashable {
     let channel_id, channel_avatar, poster, manifest, description: String?
     let status, moderation, publication_policy, moderation_note: String?
     let published: Bool?
+    let comments_enabled: Bool?
+    let quality_status: String?
+    let quality_progress: Int?
+    let progress: Int?
     let publish_at: Double?
     let created: Double?
     let duration: Double?
@@ -1308,6 +1312,9 @@ private struct Watch: View {
 
 private struct WebsitePlayer: UIViewRepresentable {
     let video: Video
+    private static func needsSession(_ video: Video) -> Bool {
+        video.publication_policy == "private" || video.published == false
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(video: video) }
 
@@ -1328,7 +1335,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         webView.scrollView.isScrollEnabled = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         if let page = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "Player") {
-            if video.publication_policy == "private", let html = Self.embeddedPlayer(page) {
+            if Self.needsSession(video), let html = Self.embeddedPlayer(page) {
                 Task { @MainActor in
                     for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] {
                         await config.websiteDataStore.httpCookieStore.setCookie(cookie)
@@ -1438,7 +1445,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         init(video: Video) { self.video = video }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            guard webView.url?.isFileURL == true || video.publication_policy == "private" else { return }
+            guard webView.url?.isFileURL == true || WebsitePlayer.needsSession(video) else { return }
             guard let manifest = remote(video.manifest) else {
                 webView.evaluateJavaScript("document.getElementById('player').textContent='Видео пока недоступно';document.body.style.color='white';", completionHandler: nil)
                 return
@@ -1665,6 +1672,9 @@ private struct CreatorHome: View {
     @State private var about = ""
     @State private var error = ""
     @State private var saving = false
+    @State private var inStudio = false
+    @State private var studioQuery = ""
+    @State private var studioFilter = "Всё"
 
     var body: some View {
         if editing { editor } else { channelPage }
@@ -1672,6 +1682,9 @@ private struct CreatorHome: View {
     private var channelPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if inStudio, let profile {
+                    studioContent(profile)
+                } else {
                 HStack {
                     Text("Мой канал").font(.headline)
                     Spacer()
@@ -1698,6 +1711,10 @@ private struct CreatorHome: View {
                     Button { publishing = true } label: {
                         Label("Опубликовать видео", systemImage: "plus").frame(maxWidth: .infinity, minHeight: 36)
                     }.buttonStyle(.borderedProminent).foregroundStyle(appBackground)
+                    Button { inStudio = true } label: {
+                        Label("Студия автора", systemImage: "rectangle.stack")
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                    }.buttonStyle(.bordered)
                     Text("Ваши видео").font(.custom("DelaGothicOne-Regular", size: 19))
                     if videos.isEmpty { Text("На канале пока нет видео.").foregroundStyle(.secondary) }
                     ForEach(videos) { video in
@@ -1736,6 +1753,7 @@ private struct CreatorHome: View {
                     Text(error)
                     Button("Повторить") { Task { await load() } }
                 }
+                }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
         }
         .task(id: auth.account?.name) {
@@ -1768,6 +1786,65 @@ private struct CreatorHome: View {
         }
         .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await refreshVideos() } }) {
             PublishVideo(channel: profile?.name ?? "")
+        }
+    }
+
+    private func studioContent(_ profile: Profile) -> some View {
+        let mine = videos.filter { !$0.live && $0.status != "starting" }
+        let shown = mine.filter { video in
+            let published = publicationStatus(video) == "Опубликовано"
+            let matchesFilter = studioFilter == "Всё" || (studioFilter == "Опубликовано" ? published : !published)
+            return matchesFilter && (studioQuery.isEmpty || video.title.localizedCaseInsensitiveContains(studioQuery))
+        }
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Button { inStudio = false } label: {
+                    Label("Мой канал", systemImage: "chevron.left").font(.subheadline)
+                }.buttonStyle(.plain)
+                Spacer()
+                Button("Настройки") {
+                    name = profile.name; about = profile.about; error = ""; editing = true
+                }.font(.footnote).foregroundStyle(lime)
+            }
+            Text("Студия автора").font(.custom("DelaGothicOne-Regular", size: 23))
+            Text(profile.name + (mine.isEmpty ? "" : " · \(mine.count) видео"))
+                .font(.subheadline).foregroundStyle(.secondary)
+            if mine.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "play.document").font(.title2)
+                        .frame(width: 72, height: 72).background(creatorSurface, in: RoundedRectangle(cornerRadius: 22))
+                    Text("У вас пока нет видео").font(.custom("DelaGothicOne-Regular", size: 18))
+                    Text("Добавьте первый ролик в свой канал.").font(.subheadline).foregroundStyle(.secondary)
+                    creatorButton("Создать видео") { publishing = true }
+                }.frame(maxWidth: .infinity).padding(.top, 100)
+            } else {
+                creatorButton("+ Создать видео") { publishing = true }
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                    TextField("Поиск по названию", text: $studioQuery)
+                }.font(.subheadline).padding(12).creatorField()
+                HStack(spacing: 8) {
+                    ForEach(["Всё", "Опубликовано", "В работе"], id: \.self) { value in
+                        Button { studioFilter = value } label: {
+                            Text(value).font(.caption.bold()).lineLimit(1).padding(.horizontal, 12)
+                                .padding(.vertical, 9).foregroundStyle(studioFilter == value ? appBackground : .white)
+                                .background(studioFilter == value ? lime : creatorSurface, in: RoundedRectangle(cornerRadius: 9))
+                        }.buttonStyle(.plain)
+                    }
+                }
+                if shown.isEmpty { Text("Видео не найдено").foregroundStyle(.secondary) }
+                ForEach(shown) { video in
+                    HStack {
+                        Button { editingVideo = video } label: { ownerVideoRow(video) }.buttonStyle(.plain)
+                        Menu {
+                            Button("Изменить") { editingVideo = video }
+                            Button("Удалить", role: .destructive) { deletingVideo = video }
+                        } label: { Image(systemName: "ellipsis").frame(width: 36, height: 44) }
+                    }
+                    Divider()
+                }
+            }
+            if !managementError.isEmpty { Text(managementError).font(.caption) }
         }
     }
 
@@ -1836,10 +1913,19 @@ private struct CreatorHome: View {
         HStack(spacing: 10) {
             Artwork(path: video.poster).frame(width: 108, height: 61)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(alignment: .bottomTrailing) {
+                    if let duration = video.duration, duration > 0 {
+                        Text(clock(duration)).font(.caption2.bold()).padding(3)
+                            .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 3)).padding(4)
+                    }
+                }
             VStack(alignment: .leading) {
                 Text(video.title).lineLimit(2)
-                Text(publicationStatus(video)).font(.caption)
-                    .foregroundStyle(video.moderation == "rejected" ? Color.orange : lime)
+                Text("\(video.views ?? 0) просмотров").font(.caption2).foregroundStyle(.secondary)
+                let tint: Color = video.moderation == "rejected" ? .red : video.status == "processing" ? .blue : lime
+                Text(publicationStatus(video)).font(.caption2.weight(.semibold))
+                    .foregroundStyle(tint).padding(.horizontal, 7).padding(.vertical, 4)
+                    .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 5))
             }
             Spacer(minLength: 0)
             if video.moderation == "rejected" {
@@ -1901,44 +1987,115 @@ private struct EditPublishedVideo: View {
     @State private var description: String
     @State private var error = ""
     @State private var busy = false
+    @State private var privateVideo: Bool
+    @State private var comments: Bool
+    @State private var scheduled: Bool
+    @State private var publishDate: Date
+    @State private var cover: PhotosPickerItem?
+    @State private var coverPreview: UIImage?
+    @State private var preview = false
 
     init(video: Video) {
         self.video = video
         _category = State(initialValue: VideoCategory(rawValue: video.category ?? "") ?? .general)
         _title = State(initialValue: video.title)
         _description = State(initialValue: video.description ?? "")
+        _privateVideo = State(initialValue: video.publication_policy == "private")
+        _comments = State(initialValue: video.comments_enabled ?? true)
+        _scheduled = State(initialValue: video.published != true && (video.publish_at ?? 0) > Date().timeIntervalSince1970)
+        _publishDate = State(initialValue: Date(timeIntervalSince1970: video.publish_at ?? Date().addingTimeInterval(3600).timeIntervalSince1970))
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            creatorHeader("Изменить видео", icon: "chevron.left", disabled: busy) { dismiss() }
+            creatorHeader("Мои видео", icon: "chevron.left", disabled: busy) { dismiss() }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    Text("Карточка видео").font(.title2.bold())
+                    statusBanner
+                    Button { preview = true } label: {
+                        HStack(spacing: 14) {
+                            Artwork(path: video.poster).frame(width: 152, height: 86)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .overlay { Image(systemName: "play.fill").padding(9).background(.black.opacity(0.65), in: Circle()) }
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Предпросмотр").font(.subheadline.bold())
+                                Text(video.qualities?.map { "\($0.height)p" }.joined(separator: ", ") ?? "")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain).disabled(video.qualities?.isEmpty != false)
+                    Group {
                     Text("Название видео").font(.caption).foregroundStyle(.secondary)
                     TextField("Название", text: $title).padding(12).creatorField()
                     Text("Описание").font(.caption).foregroundStyle(.secondary)
                     TextEditor(text: $description).scrollContentBackground(.hidden)
-                        .frame(minHeight: 120).padding(8).creatorField()
-                    Picker("Раздел", selection: $category) {
+                        .frame(minHeight: 54).padding(8).creatorField()
+                    Text("Обложка").font(.caption).foregroundStyle(.secondary)
+                    PhotosPicker(selection: $cover, matching: .images) {
+                        HStack(spacing: 12) {
+                            Group {
+                                if let coverPreview { Image(uiImage: coverPreview).resizable().scaledToFill() }
+                                else { Artwork(path: video.poster) }
+                            }.frame(width: 78, height: 44).clipShape(RoundedRectangle(cornerRadius: 7))
+                            Text("Заменить обложку").font(.caption.bold()).foregroundStyle(lime)
+                        }
+                    }.buttonStyle(.plain)
+                    Picker("Категория", selection: $category) {
                         ForEach(VideoCategory.allCases, id: \.self) { item in Text(item.label).tag(item) }
+                    }.padding(8).creatorField()
+                    HStack {
+                        Picker("Доступ", selection: $privateVideo) {
+                            Text("Для всех").tag(false)
+                            Text("Только я").tag(true)
+                        }.padding(5).creatorField()
+                        Toggle("Комментарии", isOn: $comments).font(.caption).padding(8).creatorField()
                     }
-                    if video.moderation == "rejected", let reason = video.moderation_note, !reason.isEmpty {
-                        Label(reason, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.secondary)
+                    if !privateVideo {
+                        Toggle("Запланировать публикацию", isOn: $scheduled).font(.subheadline)
+                        if scheduled { DatePicker("Публикация", selection: $publishDate, in: Date()...) }
                     }
-                    if video.publication_policy != "private" {
-                        Label("После сохранения видео снова отправится на модерацию.", systemImage: "info.circle")
-                            .font(.caption).foregroundStyle(.secondary)
                     }
+                    .disabled(video.status != "ready" || video.moderation == "removed")
                     if !error.isEmpty { Text(error).font(.caption) }
                 }.padding(16).disabled(busy)
             }
-            creatorButton(busy ? "Сохраняем…" : "Сохранить") { Task { await save() } }
-                .disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                          (title == video.title && description == (video.description ?? "") && category.rawValue == (video.category ?? "general")))
+            creatorButton(busy ? "Сохраняем…" : video.moderation == "rejected" ? "Исправить и отправить повторно" : "Сохранить изменения") { Task { await save() } }
+                .disabled(busy || video.status != "ready" || video.moderation == "removed" || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .padding(16)
         }
         .background(appBackground.ignoresSafeArea())
         .interactiveDismissDisabled(busy)
+        .task(id: cover) {
+            coverPreview = nil
+            if let cover, let data = try? await jpegImage(cover, maximum: 1280) { coverPreview = UIImage(data: data) }
+        }
+        .sheet(isPresented: $preview) { WebsitePlayer(video: video).aspectRatio(16 / 9, contentMode: .fit) }
+    }
+
+    @ViewBuilder
+    private var statusBanner: some View {
+        if video.moderation == "rejected" {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Отклонено").bold().foregroundStyle(.red)
+                Text(video.moderation_note ?? "Модератор не указал причину.")
+            }.font(.subheadline).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14).background(.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+        } else if video.status == "processing" || video.status == "queued" || video.quality_status == "processing" {
+            let percent = min(100, max(0, video.quality_progress ?? video.progress ?? 0))
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Обрабатывается · \(percent)%").bold()
+                let ready = (video.qualities ?? []).map { "\($0.height)p готово" }.joined(separator: "   ")
+                if !ready.isEmpty { Text(ready).font(.caption) }
+                ProgressView(value: Double(percent), total: 100)
+            }.padding(14).background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+        } else if scheduled {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Запланировано").bold().foregroundStyle(lime)
+                Text(publishDate.formatted(date: .abbreviated, time: .shortened))
+            }.frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14).background(creatorSurface, in: RoundedRectangle(cornerRadius: 12))
+        }
     }
 
     private func save() async {
@@ -1946,8 +2103,18 @@ private struct EditPublishedVideo: View {
         error = ""
         defer { busy = false }
         do {
-            let _: WriteResult = try await request("/api/admin/media/" + video.id + "/owner-edit",
-                method: "PATCH", json: ["title": title, "description": description, "category": category.rawValue])
+            let coverData: Data?
+            if let cover { coverData = try await jpegImage(cover, maximum: 1280) }
+            else { coverData = nil }
+            var settings: [String: Any] = ["title": title, "description": description, "category": category.rawValue,
+                "publication_policy": privateVideo ? "private" : "public", "comments_enabled": comments,
+                "publish_at": NSNull()]
+            if scheduled && !privateVideo { settings["publish_at"] = publishDate.timeIntervalSince1970 }
+            let _: WriteResult = try await request("/api/admin/media/" + video.id + "/owner-edit", method: "PATCH", json: settings)
+            if let coverData {
+                let _: WriteResult = try await request("/api/admin/media/" + video.id + "/cover",
+                    method: "PUT", bytes: coverData, headers: ["Content-Type": "image/jpeg"])
+            }
             dismiss()
         } catch { self.error = error.localizedDescription }
     }
