@@ -129,8 +129,7 @@ private struct Home: View {
     @State private var videos: [Video] = []
     @State private var failure = false
     @State private var tab = "Главная"
-    @GestureState private var dockDragIndex: Int?
-    @Namespace private var dockSelection
+    @GestureState private var dockDragX: CGFloat?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let dockTabs = ["Главная", "Эфиры", "Подписки", "Профиль"]
     @State private var filter = "Всё"
@@ -259,17 +258,28 @@ private struct Home: View {
 
     private var dock: some View {
         GeometryReader { geometry in
+            let width = geometry.size.width / CGFloat(dockTabs.count)
+            let selected = dockTabs.firstIndex(of: tab) ?? 0
+            let offset = dockDragX.map { min(width * 3, max(0, $0 - width / 2)) } ?? CGFloat(selected) * width
+            let highlighted = dockDragX.map { dockTabs[dockIndex(at: $0, width: geometry.size.width)] } ?? tab
             HStack(spacing: 0) {
-                tabButton("Главная", "house")
-                tabButton("Эфиры", "dot.radiowaves.left.and.right")
-                tabButton("Подписки", "play.rectangle.on.rectangle")
-                tabButton("Профиль", "person.crop.circle")
+                tabButton("Главная", "house", highlighted: highlighted)
+                tabButton("Эфиры", "dot.radiowaves.left.and.right", highlighted: highlighted)
+                tabButton("Подписки", "play.rectangle.on.rectangle", highlighted: highlighted)
+                tabButton("Профиль", "person.crop.circle", highlighted: highlighted)
+            }
+            .background(alignment: .leading) {
+                Capsule().fill(lime.opacity(0.15))
+                    .frame(width: width, height: 48)
+                    .offset(x: offset)
+                    .animation(reduceMotion || dockDragX != nil ? nil : .spring(response: 0.28, dampingFraction: 0.8), value: offset)
+                    .allowsHitTesting(false)
             }
             .coordinateSpace(name: "tab-dock")
             .simultaneousGesture(
                 DragGesture(minimumDistance: 8, coordinateSpace: .named("tab-dock"))
-                    .updating($dockDragIndex) { value, index, _ in
-                        index = dockIndex(at: value.location.x, width: geometry.size.width)
+                    .updating($dockDragX) { value, position, _ in
+                        position = value.location.x
                     }
                     .onEnded { value in
                         selectTab(dockTabs[dockIndex(at: value.location.x, width: geometry.size.width)])
@@ -304,26 +314,18 @@ private struct Home: View {
         }
     }
 
-    private func tabButton(_ title: String, _ icon: String) -> some View {
-        let highlighted = (dockDragIndex.map { dockTabs[$0] } ?? tab) == title
-        return Button { selectTab(title) } label: {
+    private func tabButton(_ title: String, _ icon: String, highlighted: String) -> some View {
+        Button { selectTab(title) } label: {
             VStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 20))
                 Text(title).font(.caption2.weight(tab == title ? .semibold : .regular))
                     .lineLimit(1).minimumScaleFactor(0.8)
             }.frame(maxWidth: .infinity, minHeight: 44)
                 .padding(.vertical, 2)
-                .background {
-                    if highlighted {
-                        Capsule().fill(lime.opacity(0.15))
-                            .matchedGeometryEffect(id: "dock-selection", in: dockSelection)
-                    }
-                }
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(highlighted ? lime : .secondary)
-        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.8), value: highlighted)
+        .foregroundStyle(highlighted == title ? lime : .secondary)
         .accessibilityAddTraits(tab == title ? .isSelected : [])
     }
 
