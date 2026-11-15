@@ -647,8 +647,8 @@ private struct CatalogSearch: View {
     private var emptyContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(spacing: 0) {
-                Image(systemName: "magnifyingglass").font(.system(size: 21))
-                    .frame(width: 72, height: 72).background(panel, in: Circle())
+                SearchEmptyAnimation().frame(width: 160, height: 160)
+                    .accessibilityHidden(true).allowsHitTesting(false)
                 Text("Ничего не найдено").font(.custom("DelaGothicOne-Regular", size: 20))
                     .padding(.top, 24)
                 Text("По запросу «\(submitted ?? "")»\nпока нет видео или каналов.")
@@ -2749,5 +2749,27 @@ private struct OwnerConsoleBrowser: UIViewRepresentable {
             alert.addAction(UIAlertAction(title: "Готово", style: .default) { [weak alert] _ in completionHandler(alert?.textFields?.first?.text) })
             top.present(alert, animated: true)
         }
+    }
+}
+
+private struct SearchEmptyAnimation: UIViewRepresentable {
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.isOpaque = false
+        view.backgroundColor = .clear
+        view.scrollView.backgroundColor = .clear
+        view.scrollView.isScrollEnabled = false
+        view.isUserInteractionEnabled = false
+        if let url = Bundle.main.url(forResource: "search-empty", withExtension: "html", subdirectory: "Player") {
+            view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        }
+        return view
+    }
+    func updateUIView(_ view: WKWebView, context: Context) {}
+    static func dismantleUIView(_ view: WKWebView, coordinator: ()) {
+        view.stopLoading()
+        view.loadHTMLString("", baseURL: nil)
     }
 }
