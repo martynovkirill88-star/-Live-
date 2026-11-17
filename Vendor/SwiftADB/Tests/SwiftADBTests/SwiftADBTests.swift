@@ -88,4 +88,28 @@ struct SwiftADBTests {
         #expect(parsed.payload == AdbProtocol.systemIdentityStringHost)
         #expect(result!.bytesConsumed == 24 + 7)
     }
+
+    @Test("Peer EOF drains buffered installer response")
+    func installerEOF() async throws {
+        let connection = AdbConnection(keyPair: try KeyPair.generate())
+        let stream = AdbStream(connection: connection, localId: 1)
+        await stream.addPayload(Data("Success\n".utf8))
+        await stream.notifyClose(closedByPeer: true)
+        let output = try await stream.read()
+        #expect(String(decoding: output, as: UTF8.self) == "Success\n")
+        let eof = try await stream.read()
+        #expect(eof.isEmpty)
+        let repeated = try await stream.read()
+        #expect(repeated.isEmpty)
+    }
+    @Test("Peer EOF wakes waiting installer reader")
+    func waitingEOF() async throws {
+        let connection = AdbConnection(keyPair: try KeyPair.generate())
+        let stream = AdbStream(connection: connection, localId: 2)
+        let reader = Task { try await stream.read() }
+        await Task.yield()
+        await stream.notifyClose(closedByPeer: true)
+        let result = try await reader.value
+        #expect(result.isEmpty)
+    }
 }

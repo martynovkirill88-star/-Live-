@@ -104,13 +104,19 @@ private struct TVInstallBrowser: UIViewRepresentable {
             let stream=try await connection.open(destination:"exec:cmd package install -r -S \(bytes.count)")
             defer{Task{try? await stream.close()}}
             let chunk=max(1,min(65536,Int(await connection.getMaxData())));var offset=0;var last=Date.distantPast
-            while offset<bytes.count{
+            var writeError: Error?
+            do { while offset<bytes.count{
                 try Task.checkCancellation();let end=min(bytes.count,offset+chunk)
                 try await stream.write(bytes.subdata(in:offset..<end));offset=end
                 if Date().timeIntervalSince(last)>0.2{event(["type":"progress","step":"install","current":offset,"total":bytes.count]);last=Date()}
             }
+            } catch { writeError=error }
             let result=try await read(stream)
-            guard result.contains("Success") else{throw failure("Телевизор отклонил установку: "+String(result.prefix(250)))}
+            guard result.contains("Success") else {
+                if !result.isEmpty { throw failure("Телевизор отклонил установку: "+String(result.prefix(250))) }
+                if let writeError { throw failure("Телевизор закрыл установку до завершения. Проверьте разрешение установки на ТВ и свободное место. " + writeError.localizedDescription) }
+                throw failure("Телевизор не подтвердил установку. Проверьте свободное место и повторите.")
+            }
             status(product=="rustore" ? "RuStore установлен. Теперь можно установить Чепушку Live.":"Чепушка Live установлена. Можно открыть её на ТВ.",type:product=="rustore" ? "rustore-installed":"live-installed")
         }
         func scan(){

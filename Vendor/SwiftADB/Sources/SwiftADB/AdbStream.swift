@@ -35,7 +35,7 @@ public actor AdbStream {
             return readQueue.removeFirst()
         }
         if isClosed {
-            throw ADBError.streamClosed
+            return Data() // Remote CLSE is normal EOF after draining buffered output.
         }
         if pendingClose {
             isClosed = true
@@ -52,21 +52,20 @@ public actor AdbStream {
             throw ADBError.streamClosed
         }
         
-        if !writeReady {
-            await withCheckedContinuation { continuation in
-                self.writeContinuation = continuation
-            }
-        }
-        writeReady = false
-        
         let maxData = await connection.getMaxData()
         var offset = 0
-        let count = data.count
-        while offset < count {
-            let chunkLen = min(count - offset, Int(maxData))
-            let chunk = data.subdata(in: offset..<(offset + chunkLen))
-            try await connection.sendPacket(AdbProtocol.generateWrite(localId: localId, remoteId: remoteId, data: chunk))
-            offset += chunkLen
+        while offset < data.count {
+            if !writeReady {
+                await withCheckedContinuation { continuation in
+                    self.writeContinuation = continuation
+                }
+            }
+            // Peer may close while this writer waits for an ACK.
+            if isClosed || pendingClose { throw ADBError.streamClosed }
+            writeReady = false
+            let end = min(data.count, offset + Int(maxData))
+            try await connection.sendPacket(AdbProtocol.generateWrite(localId: localId, remoteId: remoteId, data: data.subdata(in: offset..<end)))
+            offset = end
         }
     }
     
@@ -123,7 +122,7 @@ public actor AdbStream {
         
         if let continuation = readContinuation {
             readContinuation = nil
-            if pendingClose {
+            if closedByPeer {
                 isClosed = true
                 continuation.resume(returning: Data()) // EOF
             } else {
