@@ -13,6 +13,8 @@ struct OfflineRecord: Codable, Identifiable {
     var progress = 0.0
     var bytes: Int64 = 0
     var assetPath: String?
+    var generation: String?
+    var taskIdentifier: Int?
     var quality = ""
     var error = ""
     var isPrivate: Bool { video.publication_policy == "private" || video.published == false }
@@ -23,10 +25,14 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
     static let shared = OfflineLibrary()
     @Published private(set) var records: [String: OfflineRecord] = [:]
     @Published private(set) var online = true
+    @Published private(set) var untrackedBytes: Int64 = 0
+    @Published private(set) var cleaningStorage = false
     private let monitor = NWPathMonitor()
     private var tasks: [String: AVAssetDownloadTask] = [:]
     private var preparations: [String: Task<Void, Never>] = [:]
+    private var validations: [String: Task<Void, Never>] = [:]
     private var lastSaved = Date.distantPast
+    private var backgroundEventsFinished = false
     var backgroundCompletion: (() -> Void)?
     static let sessionID = "fun.chepushkavpn.live.offline-hls"
     static var root: URL {
@@ -55,11 +61,15 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
             guard let self else { return }
             var active = Set<String>()
             for case let task as AVAssetDownloadTask in restored {
-                guard let id = task.taskDescription, self.records[id] != nil else { task.cancel(); continue }
+                guard let id = self.recordID(for: task) else { task.cancel(); continue }
                 active.insert(id); self.tasks[id] = task; task.resume()
             }
-            for (id, record) in self.records where ["preparing", "downloading"].contains(record.status) && !active.contains(id) {
+            active.formUnion(self.tasks.keys); active.formUnion(self.preparations.keys); active.formUnion(self.validations.keys)
+            for (id, record) in self.records where ["preparing", "downloading", "checking"].contains(record.status) && !active.contains(id) {
                 self.mutate(id) { $0.status = "paused"; $0.error = "Загрузка прервана. Нажмите «Повторить»." }
+            }
+            for (id, record) in self.records where record.status == "paused" && self.assetURL(record) != nil && !active.contains(id) {
+                self.validate(id, generation: record.generation, taskID: record.taskIdentifier, knownComplete: false)
             }
             self.save(force: true)
         } }
@@ -75,9 +85,17 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         return FileManager.default.fileExists(atPath: file.path) ? file : nil
     }
     func assetURL(_ record: OfflineRecord) -> URL? {
-        guard let path = record.assetPath, path.hasPrefix("Library/"), !path.split(separator: "/").contains("..") else { return nil }
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(path)
+        guard let url = OfflineDownloadPolicy.resolve(record.assetPath) else { return nil }
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+    private func recordID(for task: URLSessionTask) -> String? {
+        guard let description = task.taskDescription, let id = description.split(separator: "|").first.map(String.init),
+              let record = records[id], OfflineDownloadPolicy.matches(description: description, taskID: task.taskIdentifier,
+                id: id, generation: record.generation, expectedTaskID: record.taskIdentifier, preparing: record.status == "preparing") else { return nil }
+        if let active = tasks[id], active.taskIdentifier != task.taskIdentifier { return nil }
+        if let task = task as? AVAssetDownloadTask { tasks[id] = task }
+        mutate(id) { $0.taskIdentifier = task.taskIdentifier }
+        return id
     }
     private func mutate(_ id: String, _ change: (inout OfflineRecord) -> Void) {
         guard var record = records[id] else { return }; change(&record); records[id] = record
@@ -88,25 +106,29 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
     }
     private struct Social: Decodable { let likes: Int; let liked: Bool }
     @MainActor func start(_ video: Video) {
-        guard Self.valid(video.id), !video.live, tasks[video.id] == nil, preparations[video.id] == nil else { return }
+        guard !cleaningStorage, Self.valid(video.id), !video.live, tasks[video.id] == nil, preparations[video.id] == nil, validations[video.id] == nil else { return }
         if records[video.id]?.status == "ready" { return }
         let id = video.id
         if records[id] != nil { remove(id) }
         records[id] = OfflineRecord(id: id, video: video)
+        let generation = UUID().uuidString
+        records[id]?.generation = generation
         save(force: true)
         preparations[id] = Task { @MainActor in
-            defer { preparations[id] = nil }
+            defer { if records[id]?.generation == generation { preparations[id] = nil } }
             do {
                 guard online else { throw ServerError(status: 0, message: "Для скачивания нужен интернет.") }
                 let detail: Video = try await request("/api/media/" + id)
                 guard !detail.live else { throw ServerError(status: 0, message: "Прямой эфир пока нельзя скачать.") }
                 let comments: WatchComments = try await request("/api/media/" + id + "/comments")
                 let social: Social = try await request("/api/media/" + id + "/social")
+                try Task.checkCancellation()
                 let folder = Self.folder(id)
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(detail)) as! [String: Any]
                 if let url = remote(detail.poster) {
                     let image = try await Self.image(url)
+                    try Task.checkCancellation()
                     try image.write(to: folder.appendingPathComponent("poster.jpg"), options: .atomic)
                     object["poster"] = "offline://\(id)/poster.jpg"
                 }
@@ -125,7 +147,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
                 if let quality { parts.queryItems = (parts.queryItems ?? []).filter { $0.name != "quality" } + [URLQueryItem(name: "quality", value: quality.code)] }
                 guard let url = parts.url else { throw URLError(.badURL) }
                 try Task.checkCancellation()
-                guard records[id] != nil else { return }
+                guard records[id]?.generation == generation else { return }
                 let localVideo = try JSONDecoder().decode(Video.self, from: JSONSerialization.data(withJSONObject: object))
                 mutate(id) { $0.video = localVideo; $0.comments = comments; $0.likes = social.likes; $0.liked = social.liked; $0.quality = quality.map { "\($0.height)p" } ?? "" }
                 let cookies = HTTPCookieStorage.shared.cookies(for: origin) ?? []
@@ -133,10 +155,10 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
                 guard let task = session.makeAssetDownloadTask(asset: asset, assetTitle: detail.title, assetArtworkData: nil, options: nil) else {
                     throw ServerError(status: 0, message: "Это видео пока нельзя скачать для офлайн-просмотра.")
                 }
-                task.taskDescription = id; tasks[id] = task
-                mutate(id) { $0.status = "downloading" }; save(force: true); task.resume()
+                task.taskDescription = id + "|" + generation; tasks[id] = task
+                mutate(id) { $0.status = "downloading"; $0.taskIdentifier = task.taskIdentifier }; save(force: true); task.resume()
             } catch {
-                if records[id] != nil { mutate(id) { $0.status = "paused"; $0.error = error.localizedDescription }; save(force: true) }
+                if records[id]?.generation == generation { mutate(id) { $0.status = "paused"; $0.error = OfflineDownloadPolicy.message(error) }; save(force: true) }
             }
         }
     }
@@ -148,39 +170,103 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
     func remove(_ id: String) {
         guard Self.valid(id) else { return }
         preparations.removeValue(forKey: id)?.cancel(); tasks.removeValue(forKey: id)?.cancel()
+        validations.removeValue(forKey: id)?.cancel()
         if let record = records[id], let asset = assetURL(record), asset.pathExtension == "movpkg" { try? FileManager.default.removeItem(at: asset) }
         try? FileManager.default.removeItem(at: Self.folder(id))
         records.removeValue(forKey: id); save(force: true)
     }
     func clearPrivate() { for record in sorted where record.isPrivate { remove(record.id) } }
+    @MainActor func refreshStorage() async {
+        guard tasks.isEmpty && preparations.isEmpty && validations.isEmpty else { return }
+        let found = await Task.detached(priority: .utility) { OfflineDownloadPolicy.packages() }.value
+        guard tasks.isEmpty && preparations.isEmpty && validations.isEmpty else { return }
+        let referenced = Set(records.values.compactMap(\.assetPath))
+        untrackedBytes = found.filter { !referenced.contains($0.key) }.values.reduce(0, +)
+        for (id, record) in records { if let path = record.assetPath, let bytes = found[path] { mutate(id) { $0.bytes = bytes } } }
+        save(force: true)
+    }
+    @MainActor func clearUntracked() async {
+        guard tasks.isEmpty && preparations.isEmpty && validations.isEmpty && !cleaningStorage else { return }
+        cleaningStorage = true
+        defer { cleaningStorage = false }
+        let referenced = Set(records.values.compactMap(\.assetPath))
+        await Task.detached(priority: .utility) {
+            for path in OfflineDownloadPolicy.packages().keys where !referenced.contains(path) {
+                if let url = OfflineDownloadPolicy.resolve(path) { try? FileManager.default.removeItem(at: url) }
+            }
+        }.value
+        await refreshStorage()
+    }
     func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didLoad timeRange: CMTimeRange, totalTimeRangesLoaded loadedTimeRanges: [NSValue], timeRangeExpectedToLoad: CMTimeRange) {
-        guard let id = assetDownloadTask.taskDescription, tasks[id]?.taskIdentifier == assetDownloadTask.taskIdentifier else { return }
+        guard let id = recordID(for: assetDownloadTask) else { return }
         let expected = timeRangeExpectedToLoad.duration.seconds
         guard expected.isFinite && expected > 0 else { return }
         let loaded = loadedTimeRanges.reduce(0.0) { $0 + $1.timeRangeValue.duration.seconds }
         mutate(id) { $0.progress = min(0.99, max(0, loaded / expected)) }; save()
     }
     func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let id = assetDownloadTask.taskDescription, location.path.hasPrefix(NSHomeDirectory() + "/Library/") else { return }
-        guard tasks[id]?.taskIdentifier == assetDownloadTask.taskIdentifier, records[id] != nil else {
-            if location.pathExtension == "movpkg" { try? FileManager.default.removeItem(at: location) }; return
-        }
-        mutate(id) { $0.assetPath = String(location.path.dropFirst(NSHomeDirectory().count + 1)) }; save(force: true)
+        saveLocation(location, task: assetDownloadTask)
+    }
+    // New iOS delivers the destination before download, rather than through the deprecated finish callback.
+    @objc(URLSession:assetDownloadTask:willDownloadToURL:)
+    func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, willDownloadTo location: URL) {
+        saveLocation(location, task: assetDownloadTask)
+    }
+    private func saveLocation(_ location: URL, task: AVAssetDownloadTask) {
+        guard let path = OfflineDownloadPolicy.relativePath(location), let id = recordID(for: task) else { return }
+        mutate(id) { $0.assetPath = path }; save(force: true)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let id = task.taskDescription, let record = records[id], tasks[id]?.taskIdentifier == task.taskIdentifier else { return }; tasks[id] = nil
-        if let error { mutate(id) { $0.status = "paused"; $0.error = error.localizedDescription } }
-        else if let url = assetURL(record), AVURLAsset(url: url).assetCache?.isPlayableOffline == true {
-            let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey]
-            var bytes: Int64 = 0
-            if let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys)) {
-                for case let file as URL in files { if let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true { bytes += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0) } }
-            }
-            mutate(id) { $0.status = "ready"; $0.progress = 1; $0.bytes = bytes; $0.error = "" }
-        } else { mutate(id) { $0.status = "paused"; $0.error = "Не все фрагменты сохранены. Повторите загрузку." } }
+        guard let id = recordID(for: task), let record = records[id] else { return }
+        if let error {
+            tasks[id] = nil
+            mutate(id) { $0.status = "paused"; $0.error = OfflineDownloadPolicy.message(error) }
+        } else { validate(id, generation: record.generation, taskID: task.taskIdentifier, knownComplete: true) }
         save(force: true)
     }
+    private func validate(_ id: String, generation: String?, taskID: Int?, knownComplete: Bool) {
+        guard validations[id] == nil else { return }
+        mutate(id) { $0.status = "checking"; $0.error = "" }
+        validations[id] = Task { @MainActor in
+            defer {
+                if records[id]?.generation == generation && records[id]?.taskIdentifier == taskID { validations[id] = nil; tasks[id] = nil; save(force: true) }
+                finishBackgroundEvents()
+            }
+            do {
+                // Give legacy destination callbacks and AVFoundation's lazy metadata a chance to settle.
+                var location: URL?
+                for _ in 0..<4 {
+                    try Task.checkCancellation()
+                    guard let record = records[id], record.generation == generation, record.taskIdentifier == taskID else { return }
+                    location = assetURL(record)
+                    if location != nil { break }
+                    try await Task.sleep(nanoseconds: 150_000_000)
+                }
+                guard let location else { throw ServerError(status: 0, message: "Не удалось найти сохранённый файл. Нажмите «Повторить».") }
+                let local = AVURLAsset(url: location)
+                let playable = try await local.load(.isPlayable)
+                let cached = local.assetCache?.isPlayableOffline == true
+                let bytes = await Task.detached(priority: .utility) { OfflineDownloadPolicy.bytes(at: location) }.value
+                try Task.checkCancellation()
+                guard records[id]?.generation == generation, records[id]?.taskIdentifier == taskID else { return }
+                guard playable && bytes > 0 && (knownComplete || cached) else {
+                    throw ServerError(status: 0, message: "Не удалось проверить сохранённое видео. Нажмите «Повторить».")
+                }
+                mutate(id) { $0.status = "ready"; $0.progress = 1; $0.bytes = bytes; $0.error = "" }
+            } catch {
+                if records[id]?.generation == generation && records[id]?.taskIdentifier == taskID {
+                    mutate(id) { $0.status = "paused"; $0.error = OfflineDownloadPolicy.message(error) }
+                }
+            }
+        }
+    }
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        backgroundEventsFinished = true
+        finishBackgroundEvents()
+    }
+    private func finishBackgroundEvents() {
+        guard backgroundEventsFinished && validations.isEmpty else { return }
+        backgroundEventsFinished = false
         let completion = backgroundCompletion; backgroundCompletion = nil; completion?()
     }
 }
@@ -188,14 +274,21 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
 struct DownloadedVideosView: View {
     @ObservedObject private var library = OfflineLibrary.shared
     @State private var deleting: OfflineRecord?
+    @State private var clearUntracked = false
     var embedded = false
-    private var size: String { ByteCountFormatter.string(fromByteCount: library.sorted.reduce(0) { $0 + $1.bytes }, countStyle: .file) }
+    private var size: String { offlineSize(library.sorted.reduce(library.untrackedBytes) { $0 + $1.bytes }) }
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 Text("Скачанные видео").font(.custom("DelaGothicOne-Regular", size: 23))
                 Text(library.online ? "Видео хранятся только внутри приложения." : "Нет соединения. Эти видео можно смотреть без интернета.")
                     .font(.subheadline).foregroundStyle(.secondary)
+                    if library.untrackedBytes > 0 {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Остатки незавершённых загрузок · " + offlineSize(library.untrackedBytes)).font(.caption).foregroundStyle(.secondary)
+                            Button(library.cleaningStorage ? "Очищаем…" : "Освободить место") { clearUntracked = true }.font(.subheadline).disabled(library.cleaningStorage)
+                        }
+                    }
                 if library.sorted.isEmpty {
                     VStack(spacing: 14) {
                         Image(systemName: "arrow.down.to.line").font(.system(size: 38)).foregroundStyle(lime)
@@ -212,7 +305,7 @@ struct DownloadedVideosView: View {
                             VStack(spacing: 0) {
                                 if record.status == "paused" {
                                     Button { library.start(record.video) } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44) }
-                                        .disabled(!library.online).accessibilityLabel("Повторить загрузку")
+                                        .disabled(!library.online || library.cleaningStorage).accessibilityLabel("Повторить загрузку")
                                 }
                                 Button(role: .destructive) { deleting = record } label: { Image(systemName: "trash").frame(width: 44, height: 44) }
                                     .accessibilityLabel(record.status == "ready" ? "Удалить скачанное видео" : "Отменить загрузку")
@@ -224,11 +317,16 @@ struct DownloadedVideosView: View {
             }.padding(16)
         }
         .background(appBackground.ignoresSafeArea())
+        .task { await library.refreshStorage() }
         .navigationTitle(embedded ? "" : "Скачанные видео").navigationBarTitleDisplayMode(.inline)
         .confirmationDialog("Удалить загрузку с устройства?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible, presenting: deleting) { record in
             Button(record.status == "ready" ? "Удалить загрузку" : "Отменить скачивание", role: .destructive) { library.remove(record.id) }
             Button("Оставить", role: .cancel) {}
         } message: { _ in Text("Видео останется на сайте. Файлы на этом устройстве будут удалены.") }
+        .confirmationDialog("Удалить остатки незавершённых загрузок?", isPresented: $clearUntracked, titleVisibility: .visible) {
+            Button("Освободить место", role: .destructive) { Task { await library.clearUntracked() } }
+            Button("Оставить", role: .cancel) {}
+        } message: { Text("Удалятся только старые файлы, не связанные с текущими загрузками. Готовые видео останутся.") }
     }
     private func row(_ record: OfflineRecord) -> some View {
         HStack(alignment: .top, spacing: 12) {
@@ -237,9 +335,9 @@ struct DownloadedVideosView: View {
                 Text(record.video.title).font(.subheadline.weight(.semibold)).lineLimit(2)
                 Text(record.video.channel).font(.caption2).foregroundStyle(.secondary)
                 if record.status == "ready" {
-                    Text(ByteCountFormatter.string(fromByteCount: record.bytes, countStyle: .file) + (record.quality.isEmpty ? "" : " · " + record.quality)).font(.caption2).foregroundStyle(.secondary)
+                    Text(offlineSize(record.bytes) + (record.quality.isEmpty ? "" : " · " + record.quality)).font(.caption2).foregroundStyle(.secondary)
                 } else if record.status == "paused" { Text(record.error).font(.caption2).foregroundStyle(.secondary) }
-                else { ProgressView(value: record.progress); Text(record.status == "preparing" ? "Подготовка…" : "Скачано \(Int(record.progress * 100))%").font(.caption2).foregroundStyle(.secondary) }
+                else { ProgressView(value: record.progress); Text(record.status == "preparing" ? "Подготовка…" : record.status == "checking" ? "Проверяем загрузку…" : "Скачано \(Int(record.progress * 100))%").font(.caption2).foregroundStyle(.secondary) }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
     }

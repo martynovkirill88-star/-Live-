@@ -1112,7 +1112,7 @@ struct Watch: View {
             }.accessibilityLabel(isSaved ? "Убрать из избранного" : "В избранное").disabled(offlineRecord != nil)
             if !video.live {
                 Button {
-                    if let item = downloads.records[video.id], ["ready", "preparing", "downloading"].contains(item.status) { downloadMenu = true }
+                    if let item = downloads.records[video.id], ["ready", "preparing", "downloading", "checking"].contains(item.status) { downloadMenu = true }
                     else { downloads.start(video) }
                 } label: {
                     let item = downloads.records[video.id]
@@ -1238,11 +1238,11 @@ struct Watch: View {
                 if let offlineRecord {
                     Text("Без интернета · Данные сохранены " + offlineRecord.savedAt.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(.secondary)
                 } else if let item = downloads.records[video.id] {
-                    if ["preparing", "downloading"].contains(item.status) {
+                    if ["preparing", "downloading", "checking"].contains(item.status) {
                         ProgressView(value: item.progress)
-                        Text(item.status == "preparing" ? "Подготовка загрузки…" : "Скачивание · \(Int(item.progress * 100))%").font(.caption).foregroundStyle(.secondary)
+                        Text(item.status == "preparing" ? "Подготовка загрузки…" : item.status == "checking" ? "Проверяем загрузку…" : "Скачивание · \(Int(item.progress * 100))%").font(.caption).foregroundStyle(.secondary)
                     } else if item.status == "paused" { Text(item.error).font(.caption).foregroundStyle(.secondary) }
-                    else { Text("Скачано · " + ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file)).font(.caption).foregroundStyle(.secondary) }
+                    else { Text("Скачано · " + offlineSize(item.bytes)).font(.caption).foregroundStyle(.secondary) }
                 }
                 if !likeError.isEmpty { Text(likeError).font(.caption).foregroundStyle(.secondary) }
                 Divider().padding(.top, 6)

@@ -9,6 +9,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: brew install xcodegen
       - run: xcodegen generate
+      - name: Offline regression rules
+        run: |
+          swiftc App/OfflineDownloadPolicy.swift Tests/OfflinePolicy/main.swift -o /tmp/offline-policy-tests
+          /tmp/offline-policy-tests
       - name: Compile for iPhone
         run: xcodebuild -project ChepushkaLive.xcodeproj -scheme ChepushkaLive -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
       - name: Package unsigned IPA
