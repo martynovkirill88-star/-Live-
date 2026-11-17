@@ -103,7 +103,11 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
     }
     private func save(force: Bool = false) {
         guard force || Date().timeIntervalSince(lastSaved) > 1 else { return }; lastSaved = Date()
-        if let data = try? JSONEncoder().encode(records) { try? data.write(to: Self.root.appendingPathComponent("index.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
+        var options: Data.WritingOptions = [.atomic]
+        #if os(iOS)
+        options.insert(.completeFileProtectionUntilFirstUserAuthentication)
+        #endif
+        if let data = try? JSONEncoder().encode(records) { try? data.write(to: Self.root.appendingPathComponent("index.json"), options: options) }
     }
     private struct Social: Decodable { let likes: Int; let liked: Bool }
     @MainActor func start(_ video: Video) {
