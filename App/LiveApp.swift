@@ -86,8 +86,8 @@ func request<T: Decodable>(
     let status = (response as? HTTPURLResponse)?.statusCode ?? 0
     guard (200..<300).contains(status) else {
         let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: String])?["error"]
-        let message = status == 401 ? "Войдите через Telegram." :
-            detail ?? (String(data: data.prefix(300), encoding: .utf8).flatMap { $0.contains("<") || $0.isEmpty ? nil : $0 } ?? "Ошибка сервера: \(status)")
+        let message = detail ?? (status == 401 ? "Войдите через Telegram." :
+            (String(data: data.prefix(300), encoding: .utf8).flatMap { $0.contains("<") || $0.isEmpty ? nil : $0 } ?? "Ошибка сервера: \(status)"))
         throw ServerError(status: status, message: message)
     }
     return try JSONDecoder().decode(T.self, from: data)
@@ -1459,7 +1459,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         if let page = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "Player") {
             if Self.needsSession(video), let html = Self.embeddedPlayer(page) {
                 Task { @MainActor in
-                    for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] {
+                    for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] where cookie.name != "live_email_device" {
                         await config.websiteDataStore.httpCookieStore.setCookie(cookie)
                     }
                     webView.loadHTMLString(html, baseURL: origin)
@@ -1664,11 +1664,11 @@ private final class LiveSession: ObservableObject {
 
     func signOut() async throws {
         let _: WriteResult = try await request("/api/auth/logout", method: "POST")
-        for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] {
+        for cookie in HTTPCookieStorage.shared.cookies(for: origin) ?? [] where cookie.name != "live_email_device" {
             HTTPCookieStorage.shared.deleteCookie(cookie)
         }
         let webCookies = WKWebsiteDataStore.default().httpCookieStore
-        for cookie in await webCookies.allCookies() where cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")) == origin.host {
+        for cookie in await webCookies.allCookies() where cookie.name != "live_email_device" && cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")) == origin.host {
             await webCookies.deleteCookie(cookie)
         }
         OfflineLibrary.shared.clearPrivate()
@@ -1710,54 +1710,109 @@ private struct SignInChoices: View {
 }
 
 private struct EmailSignIn: View {
+    private struct Reply: Decodable {
+        let ok: Bool?
+        let code_required: Bool?
+        let challenge_id: String?
+        let resend_after: Int?
+    }
     @EnvironmentObject private var auth: LiveSession
     @State private var email = ""
     @State private var password = ""
+    @State private var confirmation = ""
+    @State private var code = ""
+    @State private var registering = false
+    @State private var challengeID: String?
+    @State private var resendAt = Date.distantPast
     @State private var error = ""
     @State private var busy = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                TextField("Почта", text: $email)
-                    .keyboardType(.emailAddress).textContentType(.username)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .padding(12).creatorField()
-                SecureField("Пароль", text: $password)
-                    .textContentType(.password).submitLabel(.go)
-                    .onSubmit { if canSubmit { Task { await submit() } } }
-                    .padding(12).creatorField()
-                Text("Если аккаунта ещё нет, он будет создан. Код на почту не отправляется.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                creatorButton(busy ? "Входим…" : "Продолжить") { Task { await submit() } }
-                    .disabled(!canSubmit)
+                if challengeID != nil {
+                    Text("Код отправлен на \(email). Он действует 10 минут.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    TextField("Код из письма", text: $code)
+                        .keyboardType(.numberPad).textContentType(.oneTimeCode)
+                        .padding(12).creatorField()
+                    creatorButton(busy ? "Проверяем…" : "Подтвердить почту") { Task { await submit() } }
+                        .disabled(!canSubmit)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let wait = max(0, Int(ceil(resendAt.timeIntervalSince(context.date))))
+                        Button(wait > 0 ? "Отправить повторно через \(wait) с" : "Отправить код повторно") {
+                            Task { await resend() }
+                        }.disabled(busy || wait > 0)
+                    }
+                    Button("Изменить почту / начать заново") { reset() }.disabled(busy)
+                } else {
+                    TextField("Почта", text: $email)
+                        .keyboardType(.emailAddress).textContentType(.username)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .padding(12).creatorField()
+                    SecureField("Пароль", text: $password)
+                        .textContentType(registering ? .newPassword : .password)
+                        .padding(12).creatorField()
+                    if registering {
+                        SecureField("Повторите пароль", text: $confirmation)
+                            .textContentType(.newPassword).padding(12).creatorField()
+                    }
+                    Text(registering ? "Подтвердите почту кодом из письма, чтобы создать аккаунт." : "При входе с нового устройства или подозрительной активности мы попросим код из письма.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    creatorButton(busy ? "Подождите…" : (registering ? "Зарегистрироваться" : "Войти")) {
+                        Task { await submit() }
+                    }.disabled(!canSubmit)
+                    Button(registering ? "Уже есть аккаунт? Войти" : "Нет аккаунта? Зарегистрироваться") {
+                        registering.toggle(); reset()
+                    }.disabled(busy)
+                }
                 if !error.isEmpty { Text(error).font(.footnote).foregroundStyle(.red) }
             }.padding(24)
         }
         .background(appBackground.ignoresSafeArea())
-        .navigationTitle("Вход по почте").navigationBarTitleDisplayMode(.inline)
-        .interactiveDismissDisabled(busy)
+        .navigationTitle(challengeID != nil ? "Подтверждение почты" : (registering ? "Регистрация" : "Вход по почте"))
+        .navigationBarTitleDisplayMode(.inline).interactiveDismissDisabled(busy)
     }
 
     private var canSubmit: Bool {
-        !busy && email.contains("@") && (8...256).contains(password.count)
+        if busy { return false }
+        if challengeID != nil { return code.count == 6 && code.allSatisfy { $0.isASCII && $0.isNumber } }
+        return email.contains("@") && (8...256).contains(password.count) && (!registering || password == confirmation)
     }
-
-    @MainActor
-    private func submit() async {
+    private func reset() {
+        challengeID = nil; code = ""; password = ""; confirmation = ""; error = ""
+    }
+    @MainActor private func submit() async {
         guard canSubmit else { return }
-        busy = true
-        error = ""
+        busy = true; error = ""
         defer { busy = false }
         do {
-            let _: WriteResult = try await request("/api/auth/email/continue", method: "POST",
-                json: ["email": email.trimmingCharacters(in: .whitespacesAndNewlines), "password": password])
+            let reply: Reply
+            if let challengeID {
+                reply = try await request("/api/auth/email/verify", method: "POST",
+                    json: ["challenge_id": challengeID, "code": code])
+            } else {
+                email = email.trimmingCharacters(in: .whitespacesAndNewlines)
+                reply = try await request(registering ? "/api/auth/email/register" : "/api/auth/email/login", method: "POST",
+                    json: ["email": email, "password": password, "password_confirmation": confirmation])
+            }
+            if reply.code_required == true, let ticket = reply.challenge_id {
+                challengeID = ticket; code = ""; password = ""; confirmation = ""
+                resendAt = Date().addingTimeInterval(Double(reply.resend_after ?? 60))
+                return
+            }
             await auth.refresh()
             guard auth.account != nil else { throw URLError(.userAuthenticationRequired) }
-            password = ""
-            auth.showLogin = false
-        } catch let failure as ServerError where failure.status == 401 {
-            error = "Почта или пароль неверны."
+            reset(); auth.showLogin = false
+        } catch { self.error = error.localizedDescription }
+    }
+    @MainActor private func resend() async {
+        guard !busy, let challengeID, Date() >= resendAt else { return }
+        busy = true; error = ""
+        defer { busy = false }
+        do {
+            let reply: Reply = try await request("/api/auth/email/resend", method: "POST", json: ["challenge_id": challengeID])
+            resendAt = Date().addingTimeInterval(Double(reply.resend_after ?? 60)); code = ""
         } catch { self.error = error.localizedDescription }
     }
 }
