@@ -382,6 +382,7 @@ private struct Home: View {
         UserDefaults.standard.set(guest, forKey: key)
         var query = URLComponents(); query.queryItems = [URLQueryItem(name: "category", value: categories[filter] ?? "all"), URLQueryItem(name: "limit", value: "16"), URLQueryItem(name: "guest", value: guest)]
         if let feedCursor { query.queryItems?.append(URLQueryItem(name: "cursor", value: feedCursor)) }
+        else { query.queryItems?.append(URLQueryItem(name: "recent", value: LocalDiscovery.recentIDs().joined(separator: ","))) }
         do {
             let page: FeedPage = try await request("/api/recommendations?" + (query.percentEncodedQuery ?? ""), timeout: 15)
             guard generation == feedGeneration else { return }
@@ -2789,6 +2790,7 @@ private enum LocalDiscovery {
         let entries = recent.sorted { $0.value > $1.value }.prefix(100)
         UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0.value) }), forKey: key)
     }
+    static func recentIDs() -> [String] { history().sorted { $0.value > $1.value }.prefix(100).map { $0.key } }
     private static func history() -> [String: Double] {
         UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
     }
