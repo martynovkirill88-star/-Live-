@@ -33,6 +33,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: fun.chepushkavpn.live
         TARGETED_DEVICE_FAMILY: 1
         GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: App/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: Чепушка Live
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -44,8 +45,3 @@ targets:
 
 
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Поиск вашего Android TV и установка RuStore и Чепушки Live с вашего разрешения.
-        INFOPLIST_KEY_NSBonjourServices:
-          - _adb._tcp
-          - _adb-tls-connect._tcp
-          - _adb-tls-pairing._tcp
-          - _androidtvremote2._tcp
