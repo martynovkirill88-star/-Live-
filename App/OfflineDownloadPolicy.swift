@@ -30,6 +30,17 @@ enum OfflineDownloadPolicy {
         }
         return url
     }
+    /// Prefer Apple's original location. Reconstructed protected aliases are not
+    /// always visible to FileManager on iOS, even though the package exists.
+    static func existingPackage(_ path: String?, noFollow: Bool, original: String? = nil,
+                                exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> URL? {
+        guard let path, resolve(path) != nil else { return nil }
+        if let original, let url = URL(string: original), relativePath(url) == path, exists(url.path) { return url }
+        for protected in noFollow ? [true, false] : [false] {
+            if let url = resolve(path, noFollow: protected), exists(url.path) { return url }
+        }
+        return nil
+    }
     static func matches(description: String?, taskID: Int, id: String, generation: String?, expectedTaskID: Int?, preparing: Bool) -> Bool {
         guard let description, !preparing, expectedTaskID == nil || expectedTaskID == taskID else { return false }
         let parts = description.split(separator: "|", omittingEmptySubsequences: false)

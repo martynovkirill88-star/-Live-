@@ -27,5 +27,9 @@ check(!OfflineDownloadPolicy.matches(description: "a|old", taskID: 1, id: "a", g
 check(OfflineDownloadPolicy.matches(description: "a", taskID: 1, id: "a", generation: nil, expectedTaskID: nil, preparing: false), "Legacy restored callback rejected")
 check(OfflineDownloadPolicy.message(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)).contains("отменена"), "Raw English cancellation exposed")
 check(offlineSize(0) == "0 МБ", "English Zero KB label")
+let currentPackage = "Library/UserManagedAssets/fallback.movpkg"
+check(OfflineDownloadPolicy.existingPackage(currentPackage, noFollow: true, exists: { !$0.hasPrefix("/.nofollow/") })?.path.hasPrefix("/.nofollow/") == false, "Existing plain package hidden by unavailable protected alias")
+check(OfflineDownloadPolicy.existingPackage(currentPackage, noFollow: true, exists: { _ in false }) == nil, "Missing package accepted")
+check(OfflineDownloadPolicy.existingPackage("Library/../outside.movpkg", noFollow: true, exists: { _ in true }) == nil, "Fallback bypassed path confinement")
 try manager.removeItem(at: base)
 print("PASS offline paths, aliases, occupied size, orphan discovery, task generations, legacy restore and cancellation text")

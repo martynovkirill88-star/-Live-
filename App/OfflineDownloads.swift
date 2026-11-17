@@ -13,6 +13,7 @@ struct OfflineRecord: Codable, Identifiable {
     var progress = 0.0
     var bytes: Int64 = 0
     var assetPath: String?
+    var assetLocation: String?
     var assetNoFollow: Bool?
     var generation: String?
     var taskIdentifier: Int?
@@ -91,8 +92,17 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         return FileManager.default.fileExists(atPath: file.path) ? file : nil
     }
     func assetURL(_ record: OfflineRecord) -> URL? {
-        guard let url = OfflineDownloadPolicy.resolve(record.assetPath, noFollow: record.assetNoFollow == true) else { return nil }
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        OfflineDownloadPolicy.existingPackage(record.assetPath, noFollow: record.assetNoFollow == true, original: record.assetLocation)
+    }
+    func diagnostic(_ record: OfflineRecord) -> String {
+        let normal = OfflineDownloadPolicy.resolve(record.assetPath)
+        let protected = OfflineDownloadPolicy.resolve(record.assetPath, noFollow: true)
+        let exists: (URL?) -> Bool = { url in url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
+        return "Offline diagnostic 3.6.3 (35)\nOS: " + ProcessInfo.processInfo.operatingSystemVersionString +
+            "\nStatus: " + record.status + "\nGeneration: " + (record.generation == nil ? "legacy" : "current") +
+            "\nDestination recorded: " + String(record.assetPath != nil) + "\nOriginal URL recorded: " + String(record.assetLocation != nil) +
+            "\nProtected alias: " + String(record.assetNoFollow == true) + "\nPlain exists: " + String(exists(normal)) +
+            "\nProtected exists: " + String(exists(protected)) + "\nBytes: " + String(record.bytes) + "\nError: " + record.error
     }
     private func recordID(for task: URLSessionTask) -> String? {
         guard let description = task.taskDescription, let id = description.split(separator: "|").first.map(String.init),
@@ -224,7 +234,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
     }
     private func saveLocation(_ location: URL, task: AVAssetDownloadTask) {
         guard let path = OfflineDownloadPolicy.relativePath(location), let id = recordID(for: task) else { return }
-        mutate(id) { $0.assetPath = path; $0.assetNoFollow = OfflineDownloadPolicy.usesNoFollow(location) }; save(force: true)
+        mutate(id) { $0.assetPath = path; $0.assetLocation = location.absoluteString; $0.assetNoFollow = OfflineDownloadPolicy.usesNoFollow(location) }; save(force: true)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let id = recordID(for: task), let record = records[id] else { return }
@@ -350,7 +360,10 @@ struct DownloadedVideosView: View {
                 Text(record.video.channel).font(.caption2).foregroundStyle(.secondary)
                 if record.status == "ready" {
                     Text(offlineSize(record.bytes) + (record.quality.isEmpty ? "" : " · " + record.quality)).font(.caption2).foregroundStyle(.secondary)
-                } else if record.status == "paused" { Text(record.error).font(.caption2).foregroundStyle(.secondary) }
+                } else if record.status == "paused" {
+                    Text(record.error).font(.caption2).foregroundStyle(.secondary)
+                    ShareLink(item: library.diagnostic(record)) { Text("Поделиться диагностикой").font(.caption2) }
+                }
                 else { ProgressView(value: record.progress); Text(record.status == "preparing" ? "Подготовка…" : record.status == "checking" ? "Проверяем загрузку…" : "Скачано \(Int(record.progress * 100))%").font(.caption2).foregroundStyle(.secondary) }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
