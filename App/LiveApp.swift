@@ -188,7 +188,20 @@ private struct Home: View {
                     headerButton("gearshape", label: "Настройки") { settings = true }
                     headerButton("magnifyingglass", label: "Поиск") { search = true }
                 }.padding(.horizontal, 16)
-                if !downloads.online || (failure && !downloads.ready.isEmpty) { DownloadedVideosView(embedded: true) } else if tab == "Профиль" { CreatorHome() } else {
+                if !downloads.online || (failure && !downloads.ready.isEmpty) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 14) {
+                            Text("Скачанные видео").font(.custom("DelaGothicOne-Regular", size: 23))
+                            Text("Без интернета · Доступно на устройстве").font(.subheadline).foregroundStyle(.secondary)
+                            if downloads.ready.isEmpty { Text("Пока нет скачанных видео. Скачайте их заранее, когда появится интернет.").foregroundStyle(.secondary) }
+                            ForEach(downloads.ready) { record in
+                                NavigationLink { Watch(video: record.video, offlineRecord: record) } label: {
+                                    FeedCard(video: record.video).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
+                        }.padding(16)
+                    }
+                } else if tab == "Профиль" { CreatorHome() } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         if tab == "Главная" {
@@ -1215,7 +1228,7 @@ struct Watch: View {
     @State private var expandedDescription = false
     var body: some View {
         ScrollView {
-            if let offlineRecord, let url = downloads.assetURL(offlineRecord) { OfflineNativePlayer(url: url, id: video.id) }
+            if let offlineRecord, let url = downloads.assetURL(offlineRecord) { OfflineNativePlayer(url: url, id: video.id, quality: offlineRecord.quality) }
             else { WebsitePlayer(video: video).aspectRatio(16 / 9, contentMode: .fit) }
             VStack(alignment: .leading, spacing: 14) {
                 Text(video.title).font(.title2.bold())

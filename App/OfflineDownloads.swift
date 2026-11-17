@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Network
+import WebKit
 
 struct OfflineRecord: Codable, Identifiable {
     let id: String
@@ -98,7 +99,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         let normal = OfflineDownloadPolicy.resolve(record.assetPath)
         let protected = OfflineDownloadPolicy.resolve(record.assetPath, noFollow: true)
         let exists: (URL?) -> Bool = { url in url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
-        return "Offline diagnostic 3.6.3 (35)\nOS: " + ProcessInfo.processInfo.operatingSystemVersionString +
+        return "Offline diagnostic 3.6.4 (36)\nOS: " + ProcessInfo.processInfo.operatingSystemVersionString +
             "\nStatus: " + record.status + "\nGeneration: " + (record.generation == nil ? "legacy" : "current") +
             "\nDestination recorded: " + String(record.assetPath != nil) + "\nOriginal URL recorded: " + String(record.assetLocation != nil) +
             "\nProtected alias: " + String(record.assetNoFollow == true) + "\nPlain exists: " + String(exists(normal)) +
@@ -418,46 +419,113 @@ private struct OfflineVideoLayer: UIViewRepresentable {
 struct OfflineNativePlayer: View {
     @StateObject private var playback: OfflinePlayback
     @State private var fullscreen = false
-    @State private var controls = true
-    @State private var hide: Task<Void, Never>?
     @Environment(\.scenePhase) private var scene
-    init(url: URL, id: String) { _playback = StateObject(wrappedValue: OfflinePlayback(url: url, id: id)) }
+    private let quality: String
+    init(url: URL, id: String, quality: String) {
+        self.quality = quality
+        _playback = StateObject(wrappedValue: OfflinePlayback(url: url, id: id))
+    }
     var body: some View {
-        Group { if fullscreen { Color.black } else { canvas(expanded: false) } }
+        Group { if fullscreen { Color.black } else { canvas } }
             .aspectRatio(16 / 9, contentMode: .fit)
             .fullScreenCover(isPresented: $fullscreen, onDismiss: { OrientationDelegate.rotate(false) }) {
-                canvas(expanded: true).ignoresSafeArea().statusBarHidden()
+                canvas.ignoresSafeArea().statusBarHidden()
                     .onAppear { OrientationDelegate.rotate(true) }
-                    .overlay(alignment: .topLeading) { Button { fullscreen = false } label: { Image(systemName: "xmark").padding(16).background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 14)) }.padding(16).accessibilityLabel("Закрыть полноэкранный режим") }
+                    .overlay(alignment: .topLeading) {
+                        Button { fullscreen = false } label: {
+                            Image(systemName: "xmark").foregroundStyle(.white).padding(16)
+                                .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 14))
+                        }.padding(16).accessibilityLabel("Закрыть полноэкранный режим")
+                    }
             }
-            .onChange(of: playback.playing) { _ in scheduleHide() }
-            .onChange(of: scene) { if $0 != .active { playback.stop(); controls = true } }
-            .onDisappear { if !fullscreen { playback.stop(); hide?.cancel() } }
+            .onChange(of: scene) { if $0 != .active { playback.stop() } }
+            .onDisappear { if !fullscreen { playback.stop() } }
     }
-    private func scheduleHide() {
-        hide?.cancel()
-        if playback.playing { hide = Task { @MainActor in try? await Task.sleep(nanoseconds: 3_000_000_000); if !Task.isCancelled && !playback.dragging { controls = false } } }
-        else { controls = true }
-    }
-    private func canvas(expanded: Bool) -> some View {
+    private var canvas: some View {
         ZStack {
             Color.black
-            OfflineVideoLayer(player: playback.player).onTapGesture { controls.toggle(); if controls { scheduleHide() } }
-            if !playback.failure.isEmpty { Text(playback.failure).font(.caption).multilineTextAlignment(.center).padding(24) }
-            else if controls {
-                Button { playback.toggle(); scheduleHide() } label: { Image(systemName: playback.playing ? "pause.fill" : "play.fill").font(.system(size: 34)).padding(22) }.accessibilityLabel(playback.playing ? "Пауза" : "Воспроизвести")
-                VStack(spacing: 5) {
-                    Spacer()
-                    Slider(value: $playback.position, in: 0...max(1, playback.duration), onEditingChanged: { editing in playback.dragging = editing; hide?.cancel(); if !editing { playback.seek(); scheduleHide() } }).tint(lime).accessibilityLabel("Позиция воспроизведения")
-                    HStack(spacing: 12) {
-                        Button { playback.toggle() } label: { Image(systemName: playback.playing ? "pause.fill" : "play.fill").frame(width: 32, height: 32) }
-                        Text(clock(playback.position) + " / " + clock(playback.duration)).font(.caption.monospacedDigit())
-                        Spacer()
-                        Text("Скачано").font(.caption2)
-                        Button { fullscreen = !expanded; controls = true } label: { Image(systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right").frame(width: 36, height: 36) }.accessibilityLabel("Полный экран")
-                    }
-                }.padding(.horizontal, 12).padding(.bottom, expanded ? 22 : 8).background(LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .center, endPoint: .bottom))
+            OfflineVideoLayer(player: playback.player)
+            OfflinePlayerControls(playback: playback, quality: quality, expanded: fullscreen) { fullscreen.toggle() }
+        }
+    }
+}
+
+/// The bundled streaming player renders all controls; AVPlayer reads the local HLS package.
+private struct OfflinePlayerControls: UIViewRepresentable {
+    @ObservedObject var playback: OfflinePlayback
+    let quality: String
+    let expanded: Bool
+    let toggleFullscreen: () -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(playback: playback, toggleFullscreen: toggleFullscreen) }
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.userContentController.add(context.coordinator, name: "offlineMedia")
+        config.userContentController.add(context.coordinator, name: "playerOrientation")
+        let web = WKWebView(frame: .zero, configuration: config)
+        web.isOpaque = false; web.backgroundColor = .clear; web.scrollView.backgroundColor = .clear
+        web.scrollView.isScrollEnabled = false; web.scrollView.contentInsetAdjustmentBehavior = .never
+        web.navigationDelegate = context.coordinator
+        context.coordinator.quality = quality; context.coordinator.expanded = expanded
+        if let page = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "Player") {
+            web.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
+        }
+        return web
+    }
+    func updateUIView(_ web: WKWebView, context: Context) {
+        context.coordinator.expanded = expanded
+        context.coordinator.update(web)
+    }
+    static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "offlineMedia")
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "playerOrientation")
+        web.navigationDelegate = nil
+    }
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        let playback: OfflinePlayback
+        let toggleFullscreen: () -> Void
+        var quality = ""
+        var expanded = false
+        var loaded = false
+        init(playback: OfflinePlayback, toggleFullscreen: @escaping () -> Void) {
+            self.playback = playback; self.toggleFullscreen = toggleFullscreen
+        }
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.frameInfo.isMainFrame else { return }
+            if message.name == "playerOrientation" { toggleFullscreen(); return }
+            guard let data = message.body as? [String: Any], let command = data["command"] as? String else { return }
+            let value = data["value"] as? Double ?? 0
+            switch command {
+            case "play": if !playback.playing { playback.toggle() }
+            case "pause": playback.stop()
+            case "seek":
+                guard value.isFinite && value >= 0 else { return }
+                playback.position = min(value, max(0, playback.duration)); playback.seek()
+            case "mute": playback.player.isMuted = value != 0
+            case "volume": playback.player.volume = Float(min(1, max(0, value)))
+            default: break
             }
-        }.foregroundStyle(.white).buttonStyle(.plain)
+        }
+        func webView(_ web: WKWebView, didFinish navigation: WKNavigation!) {
+            guard web.url?.isFileURL == true else { return }
+            let script = """
+            const style=document.createElement('style');
+            style.textContent='html,body,#player{background:transparent!important}#player video{opacity:0}';
+            document.head.appendChild(style);
+            window.mountBundledPlayer({id:'offline',nativeOffline:true,offlineQuality:quality,duration:duration,live:false,qualities:[],manifest:'',origin:'',poster:''});
+            """
+            web.callAsyncJavaScript(script, arguments: ["quality": quality, "duration": playback.duration], in: nil, in: .page) { [weak self, weak web] result in
+                guard let self, let web else { return }
+                if case .success = result { self.loaded = true; self.update(web) }
+            }
+        }
+        func update(_ web: WKWebView) {
+            guard loaded else { return }
+            let state: [String: Any] = ["position": playback.position, "duration": playback.duration,
+                "paused": !playback.playing, "ready": playback.player.currentItem?.status == .readyToPlay,
+                "muted": playback.player.isMuted, "volume": playback.player.volume, "failure": playback.failure]
+            web.callAsyncJavaScript("window.updateOfflineMedia(state);document.body.classList.toggle('app-fullscreen',expanded)",
+                                    arguments: ["state": state, "expanded": expanded], in: nil, in: .page, completionHandler: nil)
+        }
     }
 }
