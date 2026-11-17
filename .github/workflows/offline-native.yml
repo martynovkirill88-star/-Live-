@@ -1,0 +1,19 @@
+name: Native offline download regression
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile native AVFoundation probe
+        run: |
+          mkdir -p /tmp/OfflineProbe.app/Contents/MacOS
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string fun.chepushkavpn.offline-probe' /tmp/OfflineProbe.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string OfflineProbe' /tmp/OfflineProbe.app/Contents/Info.plist
+          swiftc App/OfflineDownloadPolicy.swift Tests/NativeOffline/main.swift -o /tmp/OfflineProbe.app/Contents/MacOS/OfflineProbe -framework AVFoundation
+          codesign --force --sign - /tmp/OfflineProbe.app
+      - name: Download and validate actual native HLS package
+        run: /tmp/OfflineProbe.app/Contents/MacOS/OfflineProbe

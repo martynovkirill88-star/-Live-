@@ -221,6 +221,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         if let error {
             tasks[id] = nil
             mutate(id) { $0.status = "paused"; $0.error = OfflineDownloadPolicy.message(error) }
+            Task { @MainActor in await refreshStorage() }
         } else { validate(id, generation: record.generation, taskID: task.taskIdentifier, knownComplete: true) }
         save(force: true)
     }
@@ -231,6 +232,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
             defer {
                 if records[id]?.generation == generation && records[id]?.taskIdentifier == taskID { validations[id] = nil; tasks[id] = nil; save(force: true) }
                 finishBackgroundEvents()
+                Task { @MainActor in await refreshStorage() }
             }
             do {
                 // Give legacy destination callbacks and AVFoundation's lazy metadata a chance to settle.
