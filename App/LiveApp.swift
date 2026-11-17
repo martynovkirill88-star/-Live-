@@ -141,6 +141,14 @@ private struct Home: View {
     @State private var settings = false
     @State private var openOwnerAfterSettings = false
     @State private var history = false
+    private struct FeedEntry: Identifiable { let id = UUID(); let video: Video }
+    private struct FeedPage: Decodable { let items: [Video]; let next_cursor: String? }
+    @State private var feed: [FeedEntry] = []
+    @State private var feedCursor: String?
+    @State private var feedLoading = false
+    @State private var feedMore = true
+    @State private var feedError = false
+    @State private var feedGeneration = UUID()
     @State private var videos: [Video] = []
     @State private var failure = false
     @State private var tab = "Главная"
@@ -232,14 +240,20 @@ private struct Home: View {
                         } else if visible.isEmpty {
                             Text(videos.isEmpty ? "Загружаем каталог…" : "Здесь пока нет видео").foregroundStyle(.secondary)
                         }
-                        ForEach(visible) { video in
-                            Button { path.append(.video(video)) } label: {
-                                FeedCard(video: video).contentShape(Rectangle())
+                        if tab == "Главная" && filter != "В эфире" {
+                            ForEach(Array(feed.enumerated()), id: \.element.id) { index, entry in
+                                Button { path.append(.video(entry.video)) } label: { FeedCard(video: entry.video).contentShape(Rectangle()) }.buttonStyle(.plain)
+                                    .onAppear { if index >= feed.count - 5 { Task { await nextFeed() } } }
                             }
-                                .buttonStyle(.plain)
+                            if feedLoading { ProgressView("Загружаем рекомендации…").frame(maxWidth: .infinity) }
+                            else if feedMore || feedError { Button(feedError ? "Не удалось загрузить. Повторить" : "Показать ещё") { Task { await nextFeed() } }.frame(maxWidth: .infinity) }
+                        } else {
+                            ForEach(visible) { video in
+                                Button { path.append(.video(video)) } label: { FeedCard(video: video).contentShape(Rectangle()) }.buttonStyle(.plain)
+                            }
                         }
                     }.padding(16)
-                }.refreshable { await load() }
+                }.refreshable { await load(); await resetFeed() }
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -259,8 +273,9 @@ private struct Home: View {
                 }
             }
             .task { await load() }
+            .task(id: tab + "|" + filter + "|" + (auth.account?.name ?? "guest")) { await resetFeed() }
             .onChange(of: downloads.online) { online in
-                if !online { path.removeAll() } else { Task { await load() } }
+                if !online { path.removeAll() } else { Task { await load(); await resetFeed() } }
             }
             .sheet(isPresented: $ownerConsole) { OwnerConsoleSheet() }
             .sheet(isPresented: $settings, onDismiss: {
@@ -352,6 +367,29 @@ private struct Home: View {
         .accessibilityAddTraits(tab == title ? .isSelected : [])
     }
 
+    @MainActor private func resetFeed() async {
+        guard tab == "Главная", filter != "В эфире", downloads.online else { return }
+        feedGeneration = UUID(); feed = []; feedCursor = nil; feedMore = true; feedLoading = false
+        await nextFeed()
+    }
+    @MainActor private func nextFeed() async {
+        guard !feedLoading, feedMore, downloads.online, tab == "Главная", filter != "В эфире" else { return }
+        let generation = feedGeneration
+        feedLoading = true; feedError = false
+        let categories = ["Всё":"all", "Общий":"general", "Музыка":"music", "Путешествия":"travel", "Детский":"kids"]
+        let key = "live.recommendation.guest"
+        let guest = UserDefaults.standard.string(forKey: key) ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        UserDefaults.standard.set(guest, forKey: key)
+        var query = URLComponents(); query.queryItems = [URLQueryItem(name: "category", value: categories[filter] ?? "all"), URLQueryItem(name: "limit", value: "16"), URLQueryItem(name: "guest", value: guest)]
+        if let feedCursor { query.queryItems?.append(URLQueryItem(name: "cursor", value: feedCursor)) }
+        do {
+            let page: FeedPage = try await request("/api/recommendations?" + (query.percentEncodedQuery ?? ""), timeout: 15)
+            guard generation == feedGeneration else { return }
+            feed.append(contentsOf: page.items.map { FeedEntry(video: $0) }); feedCursor = page.next_cursor; feedMore = page.next_cursor != nil
+            for video in page.items where !videos.contains(where: { $0.id == video.id }) { videos.append(video) }
+        } catch { if generation == feedGeneration { feedError = true } }
+        if generation == feedGeneration { feedLoading = false }
+    }
     private func load() async {
         guard downloads.online else { return }
         failure = false
