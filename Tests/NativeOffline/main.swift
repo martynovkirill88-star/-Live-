@@ -30,10 +30,27 @@ final class Probe: NSObject, AVAssetDownloadDelegate {
                 guard try await local.load(.isPlayable) else { fatalError("Completed local package is not playable") }
                 let bytes = OfflineDownloadPolicy.bytes(at: restored)
                 guard bytes > 0 else { fatalError("Completed package reports zero bytes") }
-                let tracks = try await local.loadTracks(withMediaType: .video)
-                guard !tracks.isEmpty, try await local.load(.duration).seconds > 300 else { fatalError("Local video metadata missing") }
+                // HLS doesn't expose useful AVAsset duration/tracks until an AVPlayerItem opens it.
+                let item = AVPlayerItem(asset: local)
+                let player = AVPlayer(playerItem: item)
+                player.isMuted = true; player.play()
+                for _ in 0..<120 {
+                    if item.status == .failed { throw item.error ?? NSError(domain: "probe", code: 1) }
+                    if player.currentTime().seconds > 0.3 { break }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard player.currentTime().seconds > 0.3 else { fatalError("Local HLS playback did not advance") }
+                let seeked = await player.seek(to: CMTime(seconds: 200, preferredTimescale: 600))
+                guard seeked else { fatalError("Offline seek failed") }
+                for _ in 0..<100 {
+                    if item.status == .failed { throw item.error ?? NSError(domain: "probe", code: 2) }
+                    if player.currentTime().seconds > 200.3 { break }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard player.currentTime().seconds > 200.3 else { fatalError("Local HLS playback after seek did not advance") }
+                player.pause()
                 try FileManager.default.removeItem(at: restored)
-                print("PASS native HLS download -> saved destination -> persisted relative path -> playable local package -> nonzero bytes and video metadata", bytes)
+                print("PASS native HLS download -> saved destination -> persisted relative path -> local playback -> seek 200s -> playback advances, bytes", bytes)
                 exit(0)
             } catch { print("NATIVE_VALIDATION_FAILURE", error); exit(1) }
         }
