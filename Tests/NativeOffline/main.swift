@@ -21,6 +21,7 @@ final class Probe: NSObject, AVAssetDownloadDelegate {
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error { print("NATIVE_DOWNLOAD_FAILURE", error); exit(1) }
+        print("HOME", NSHomeDirectory(), "DESTINATION", location?.absoluteString ?? "nil", "IS_FILE", location?.isFileURL ?? false)
         Task { @MainActor in
             do {
                 guard let location, let relative = OfflineDownloadPolicy.relativePath(location),
@@ -39,6 +40,7 @@ final class Probe: NSObject, AVAssetDownloadDelegate {
     }
 }
 let probe = Probe()
+setbuf(stdout, nil)
 probe.start()
 DispatchQueue.main.asyncAfter(deadline: .now() + 180) { print("Native download timed out"); exit(1) }
 RunLoop.main.run()
