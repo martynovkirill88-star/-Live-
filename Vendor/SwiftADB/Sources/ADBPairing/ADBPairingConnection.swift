@@ -160,6 +160,7 @@ public final class ADBPairingConnection {
     public func pair() async throws -> ADBPairingResult {
         // 1. Establish TLS 1.3 connection
         let (conn, keyingMaterial) = try await connectTLS()
+        defer { conn.cancel() }
 
         // 2. password = user_password || tls_keying_material
         let fullPassword = password + keyingMaterial
@@ -237,6 +238,7 @@ public final class ADBPairingConnection {
                 }
             }
             conn.start(queue: .global())
+            DispatchQueue.global().asyncAfter(deadline: .now()+60) { conn.cancel() }
         }
 
         // Export TLS keying material

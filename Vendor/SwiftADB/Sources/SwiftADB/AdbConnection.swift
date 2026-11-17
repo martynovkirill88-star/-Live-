@@ -116,6 +116,9 @@ public actor AdbConnection {
                 }
             }
             conn.start(queue: .global())
+            DispatchQueue.global().asyncAfter(deadline: .now()+timeout) {
+                switch conn.state {case .ready,.cancelled,.failed:break;default:conn.cancel()}
+            }
         }
         
         conn.stateUpdateHandler = nil

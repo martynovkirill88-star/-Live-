@@ -13,6 +13,8 @@ jobs:
         run: |
           swiftc App/OfflineDownloadPolicy.swift Tests/OfflinePolicy/main.swift -o /tmp/offline-policy-tests
           /tmp/offline-policy-tests
+      - name: ADB protocol and pairing regression tests
+        run: swift test --package-path Vendor/SwiftADB
       - name: Compile for iPhone
         run: xcodebuild -project ChepushkaLive.xcodeproj -scheme ChepushkaLive -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
       - name: Package unsigned IPA

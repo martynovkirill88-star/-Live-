@@ -37,7 +37,7 @@ enum TVADBIdentity {
         let spki=sequence(rsa,der(3,Data([0])+publicBytes))
         let formatter=DateFormatter();formatter.locale=Locale(identifier:"en_US_POSIX");formatter.timeZone=TimeZone(secondsFromGMT:0);formatter.dateFormat="yyyyMMddHHmmss'Z'"
         let validity=sequence(der(0x18,Data(formatter.string(from:Date().addingTimeInterval(-86400)).utf8)),der(0x18,Data(formatter.string(from:Date().addingTimeInterval(10*365*86400)).utf8)))
-        var serial=Data(count:16);let randomStatus=serial.withUnsafeMutableBytes{SecRandomCopyBytes(kSecRandomDefault,16,$0.baseAddress!)};guard randomStatus==errSecSuccess else{throw failure()};serial[0] &= 0x7f
+        var serial=Data(count:16);let randomStatus=serial.withUnsafeMutableBytes{SecRandomCopyBytes(kSecRandomDefault,16,$0.baseAddress!)};guard randomStatus==errSecSuccess else{throw failure()};serial[0] &= 0x7f;while serial.count>1 && serial[0]==0 && serial[1]&0x80==0 {serial.removeFirst()}
         let tbs=sequence(der(0xa0,der(2,Data([2]))),der(2,serial),algorithm,name,validity,name,spki)
         var error:Unmanaged<CFError>?
         guard let signature=SecKeyCreateSignature(key,.rsaSignatureMessagePKCS1v15SHA256,tbs as CFData,&error) as Data? else{if let error { throw error.takeRetainedValue() }; throw failure()}

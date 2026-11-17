@@ -44,6 +44,7 @@ let package = Package(
             path: "Sources/SwiftADB"
         ),
 
+        .testTarget(name:"SwiftADBTests",dependencies:["SwiftADB","ADBPairing"],path:"Tests/SwiftADBTests"),
     ],
     swiftLanguageModes: [.v6]
 )
