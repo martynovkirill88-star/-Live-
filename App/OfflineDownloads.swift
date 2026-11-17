@@ -99,7 +99,9 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         let normal = OfflineDownloadPolicy.resolve(record.assetPath)
         let protected = OfflineDownloadPolicy.resolve(record.assetPath, noFollow: true)
         let exists: (URL?) -> Bool = { url in url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
-        return "Offline diagnostic 3.6.6 (38)\nOS: " + ProcessInfo.processInfo.operatingSystemVersionString +
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        return "Offline diagnostic " + version + " (" + build + ")\nOS: " + ProcessInfo.processInfo.operatingSystemVersionString +
             "\nStatus: " + record.status + "\nGeneration: " + (record.generation == nil ? "legacy" : "current") +
             "\nDestination recorded: " + String(record.assetPath != nil) + "\nOriginal URL recorded: " + String(record.assetLocation != nil) +
             "\nProtected alias: " + String(record.assetNoFollow == true) + "\nPlain exists: " + String(exists(normal)) +
