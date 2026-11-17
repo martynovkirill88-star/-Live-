@@ -53,6 +53,11 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         var folder = Self.root; try? folder.setResourceValues(excluded)
         if let data = try? Data(contentsOf: Self.root.appendingPathComponent("index.json")),
            let saved = try? JSONDecoder().decode([String: OfflineRecord].self, from: data) { records = saved }
+        // Older builds persisted this failure after AVFoundation had completed. A new
+        // binary alone cannot repair an index without a saved package destination.
+        for (id, record) in records where record.status == "paused" && record.generation == nil && record.assetPath == nil {
+            mutate(id) { $0.error = "Старая загрузка не сохранила файл. Нажмите «Повторить загрузку»." }
+        }
         for (id, record) in records where record.status == "ready" && assetURL(record) == nil {
             mutate(id) { $0.status = "paused"; $0.error = "Файлы загрузки недоступны. Скачайте видео повторно." }
         }
@@ -321,6 +326,8 @@ struct DownloadedVideosView: View {
                         Divider()
                     }
                 }
+                Text("Версия " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") + " · " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"))
+                    .font(.caption2).foregroundStyle(.secondary)
             }.padding(16)
         }
         .background(appBackground.ignoresSafeArea())

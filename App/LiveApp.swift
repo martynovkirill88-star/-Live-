@@ -1241,7 +1241,13 @@ struct Watch: View {
                     if ["preparing", "downloading", "checking"].contains(item.status) {
                         ProgressView(value: item.progress)
                         Text(item.status == "preparing" ? "Подготовка загрузки…" : item.status == "checking" ? "Проверяем загрузку…" : "Скачивание · \(Int(item.progress * 100))%").font(.caption).foregroundStyle(.secondary)
-                    } else if item.status == "paused" { Text(item.error).font(.caption).foregroundStyle(.secondary) }
+                    } else if item.status == "paused" {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(item.error).font(.caption).foregroundStyle(.secondary)
+                            Button("Повторить загрузку") { downloads.start(video) }
+                                .font(.subheadline.weight(.semibold)).disabled(!downloads.online)
+                        }
+                    }
                     else { Text("Скачано · " + offlineSize(item.bytes)).font(.caption).foregroundStyle(.secondary) }
                 }
                 if !likeError.isEmpty { Text(likeError).font(.caption).foregroundStyle(.secondary) }
