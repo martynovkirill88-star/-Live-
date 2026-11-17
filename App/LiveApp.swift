@@ -1413,6 +1413,9 @@ private struct WebsitePlayer: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.scrollView.isScrollEnabled = false
+        webView.scrollView.minimumZoomScale = 1
+        webView.scrollView.maximumZoomScale = 1
+        webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         if let page = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "Player") {
             if Self.needsSession(video), let html = Self.embeddedPlayer(page) {

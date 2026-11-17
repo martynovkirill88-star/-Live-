@@ -99,7 +99,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         let normal = OfflineDownloadPolicy.resolve(record.assetPath)
         let protected = OfflineDownloadPolicy.resolve(record.assetPath, noFollow: true)
         let exists: (URL?) -> Bool = { url in url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
-        return "Offline diagnostic 3.6.5 (37)\nOS: " + ProcessInfo.processInfo.operatingSystemVersionString +
+        return "Offline diagnostic 3.6.6 (38)\nOS: " + ProcessInfo.processInfo.operatingSystemVersionString +
             "\nStatus: " + record.status + "\nGeneration: " + (record.generation == nil ? "legacy" : "current") +
             "\nDestination recorded: " + String(record.assetPath != nil) + "\nOriginal URL recorded: " + String(record.assetLocation != nil) +
             "\nProtected alias: " + String(record.assetNoFollow == true) + "\nPlain exists: " + String(exists(normal)) +
@@ -465,6 +465,8 @@ private struct OfflinePlayerControls: UIViewRepresentable {
         let web = WKWebView(frame: .zero, configuration: config)
         web.isOpaque = false; web.backgroundColor = .clear; web.scrollView.backgroundColor = .clear
         web.scrollView.isScrollEnabled = false; web.scrollView.contentInsetAdjustmentBehavior = .never
+        web.scrollView.minimumZoomScale = 1; web.scrollView.maximumZoomScale = 1
+        web.scrollView.pinchGestureRecognizer?.isEnabled = false
         web.navigationDelegate = context.coordinator
         context.coordinator.quality = quality; context.coordinator.expanded = expanded
         if let page = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "Player") {
