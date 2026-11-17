@@ -25,7 +25,7 @@ final class Probe: NSObject, AVAssetDownloadDelegate {
         Task { @MainActor in
             do {
                 guard let location, let relative = OfflineDownloadPolicy.relativePath(location),
-                      let restored = OfflineDownloadPolicy.resolve(relative) else { fatalError("Native destination lost") }
+                      let restored = OfflineDownloadPolicy.resolve(relative, noFollow: OfflineDownloadPolicy.usesNoFollow(location)) else { fatalError("Native destination lost") }
                 let local = AVURLAsset(url: restored)
                 guard try await local.load(.isPlayable) else { fatalError("Completed local package is not playable") }
                 let bytes = OfflineDownloadPolicy.bytes(at: restored)

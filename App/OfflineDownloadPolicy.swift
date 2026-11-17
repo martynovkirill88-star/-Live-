@@ -2,19 +2,32 @@ import Foundation
 
 /// Pure rules shared by native delegates and regression tests.
 enum OfflineDownloadPolicy {
+    static func usesNoFollow(_ url: URL) -> Bool { url.pathComponents.dropFirst().first == ".nofollow" }
+    private static func components(_ url: URL) -> [String] {
+        // Apple's /.nofollow/ is a protected alias of /, not part of the app's directory name.
+        func unwrapped(_ parts: [String]) -> [String] {
+            guard parts.count > 1 && parts[1] == ".nofollow" else { return parts }
+            return [parts[0]] + parts.dropFirst(2)
+        }
+        let plain = URL(fileURLWithPath: NSString.path(withComponents: unwrapped(url.standardizedFileURL.pathComponents)))
+        return unwrapped(plain.resolvingSymlinksInPath().pathComponents)
+    }
     static func relativePath(_ location: URL, home: URL = URL(fileURLWithPath: NSHomeDirectory())) -> String? {
         guard location.isFileURL else { return nil }
-        let base = home.standardizedFileURL.resolvingSymlinksInPath().pathComponents
-        let path = location.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+        let base = components(home)
+        let path = components(location)
         guard path.starts(with: base), path.count > base.count + 1 else { return nil }
         let relative = Array(path.dropFirst(base.count))
         guard relative.first == "Library", location.pathExtension == "movpkg", !relative.contains("..") else { return nil }
         return relative.joined(separator: "/")
     }
-    static func resolve(_ path: String?, home: URL = URL(fileURLWithPath: NSHomeDirectory())) -> URL? {
+    static func resolve(_ path: String?, home: URL = URL(fileURLWithPath: NSHomeDirectory()), noFollow: Bool = false) -> URL? {
         guard let path, path.hasPrefix("Library/"), !path.split(separator: "/").contains("..") else { return nil }
         let url = home.appendingPathComponent(path)
         guard relativePath(url, home: home) != nil else { return nil }
+        if noFollow {
+            return URL(fileURLWithPath: "/.nofollow" + NSString.path(withComponents: components(home)) + "/" + path)
+        }
         return url
     }
     static func matches(description: String?, taskID: Int, id: String, generation: String?, expectedTaskID: Int?, preparing: Bool) -> Bool {

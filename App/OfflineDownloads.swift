@@ -13,6 +13,7 @@ struct OfflineRecord: Codable, Identifiable {
     var progress = 0.0
     var bytes: Int64 = 0
     var assetPath: String?
+    var assetNoFollow: Bool?
     var generation: String?
     var taskIdentifier: Int?
     var quality = ""
@@ -85,7 +86,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
         return FileManager.default.fileExists(atPath: file.path) ? file : nil
     }
     func assetURL(_ record: OfflineRecord) -> URL? {
-        guard let url = OfflineDownloadPolicy.resolve(record.assetPath) else { return nil }
+        guard let url = OfflineDownloadPolicy.resolve(record.assetPath, noFollow: record.assetNoFollow == true) else { return nil }
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
     private func recordID(for task: URLSessionTask) -> String? {
@@ -214,7 +215,7 @@ final class OfflineLibrary: NSObject, ObservableObject, AVAssetDownloadDelegate 
     }
     private func saveLocation(_ location: URL, task: AVAssetDownloadTask) {
         guard let path = OfflineDownloadPolicy.relativePath(location), let id = recordID(for: task) else { return }
-        mutate(id) { $0.assetPath = path }; save(force: true)
+        mutate(id) { $0.assetPath = path; $0.assetNoFollow = OfflineDownloadPolicy.usesNoFollow(location) }; save(force: true)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let id = recordID(for: task), let record = records[id] else { return }
