@@ -452,6 +452,7 @@ private struct AccountSettings: View {
             Form {
                 Section {
                     NavigationLink { DownloadedVideosView() } label: { Label("Скачанные видео", systemImage: "arrow.down.to.line") }
+                    NavigationLink { AndroidTVSetupView() } label: { Label("Установка на Android TV", systemImage: "tv") }
                 }
                 if let account = auth.account {
                     Section(account.name) {
@@ -1495,6 +1496,7 @@ private struct WebsitePlayer: UIViewRepresentable {
     func updateUIView(_ host: UIView, context: Context) {}
 
     static func dismantleUIView(_ host: UIView, coordinator: Coordinator) {
+        coordinator.qualityRefreshTimer?.invalidate()
         coordinator.closeFullscreen()
         coordinator.player?.evaluateJavaScript("window.activePlayer?.destroy()", completionHandler: nil)
         coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerOrientation")
@@ -1504,6 +1506,16 @@ private struct WebsitePlayer: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        var qualityRefreshTimer: Timer?
+        @MainActor private func refreshQualities() {
+            guard let view = player else { qualityRefreshTimer?.invalidate(); return }
+            Task { @MainActor [weak self, weak view] in
+                guard let self, let view, let fresh: Video = try? await request("/api/media/" + video.id, timeout: 4), self.player === view else { return }
+                let qualities = (fresh.qualities ?? []).map { ["code": $0.code, "height": $0.height] as [String: Any] }
+                view.callAsyncJavaScript("window.activePlayer?.updateQualities(qualities)", arguments: ["qualities": qualities], in: nil, in: .page) { _ in }
+                if fresh.quality_status == "ready" { self.qualityRefreshTimer?.invalidate(); self.qualityRefreshTimer = nil }
+            }
+        }
         weak var host: UIView?
         weak var player: WKWebView?
         private weak var fullscreen: UIViewController?
@@ -1596,8 +1608,13 @@ private struct WebsitePlayer: UIViewRepresentable {
                     item["resume"] = resume?.position ?? 0
                 }
                 guard self.player === webView else { return }
+                self.qualityRefreshTimer?.invalidate()
+                if !video.live {
+                    self.qualityRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in Task { @MainActor in self?.refreshQualities() } }
+                }
                 webView.callAsyncJavaScript("window.mountBundledPlayer(item)", arguments: ["item": item],
                                         in: nil, in: .page) { result in
+                if case .success = result { Task { @MainActor in self.refreshQualities() } }
                 if case .failure = result {
                     webView.evaluateJavaScript("document.getElementById('player').textContent='Не удалось запустить плеер';document.body.style.color='white';", completionHandler: nil)
                 }

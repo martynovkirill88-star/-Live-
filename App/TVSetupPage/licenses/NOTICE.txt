@@ -1,0 +1,4 @@
+Android: LibADB Android 3.1.1, Muntashir Al-Islam, Apache-2.0 option, https://github.com/MuntashirAkon/libadb-android
+iOS: SwiftADB revision1044bec, akshaynexus, Apache-2.0 option and BSD-3-Clause, https://github.com/akshaynexus/SwiftADB
+Local integration and STLS/Keychain changes: Chepushka Live.
+Other dependency notices are retained in their distributions.

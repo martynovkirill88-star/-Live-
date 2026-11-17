@@ -2,6 +2,10 @@ name: ChepushkaLive
 options:
   deploymentTarget:
     iOS: "16.0"
+packages:
+  SwiftADB:
+    path: Vendor/SwiftADB
+
 targets:
   ChepushkaLive:
     type: application
@@ -10,10 +14,20 @@ targets:
       - App/LiveApp.swift
       - App/OfflineDownloads.swift
       - App/OfflineDownloadPolicy.swift
+      - App/TVSetup.swift
+      - App/TVADBIdentity.swift
+      - path: App/TVSetupPage
+        type: folder
+        buildPhase: resources
       - App/Assets.xcassets
       - path: App/Player
         type: folder
         buildPhase: resources
+    dependencies:
+      - package: SwiftADB
+        product: SwiftADB
+      - package: SwiftADB
+        product: ADBPairing
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: fun.chepushkavpn.live
@@ -22,9 +36,16 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Чепушка Live
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: 3.8.0
-        CURRENT_PROJECT_VERSION: 40
+        MARKETING_VERSION: 3.9.0
+        CURRENT_PROJECT_VERSION: 41
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Микрофон нужен для голосового поиска видео.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: Приложение распознаёт поисковый запрос на iPhone.
         SWIFT_VERSION: 5.0
 
+
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Поиск вашего Android TV и установка RuStore и Чепушки Live с вашего разрешения.
+        INFOPLIST_KEY_NSBonjourServices:
+          - _adb._tcp
+          - _adb-tls-connect._tcp
+          - _adb-tls-pairing._tcp
+          - _androidtvremote2._tcp

@@ -1,0 +1,1 @@
+SwiftADB, akshaynexus, revision1044bec57ee3aef4b7c556fce2e76b24257769e5. Used under Apache-2.0 option; retain SPDX notices in sources. Local changes: fail-closed key exporter, iOS16 Keychain identity creation, in-place ADB STLS framer, bounded stream transfers. https://github.com/akshaynexus/SwiftADB
