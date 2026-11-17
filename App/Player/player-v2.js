@@ -18,6 +18,7 @@ window.createLivePlayer = function(container,item,onWatched=()=>{}) {
   function buffering(active){
     if(dead)return;
     loader.hidden=!active;container.setAttribute('aria-busy',String(active));
+    if(!item.nativeOffline)window.onPlayerLoading?.(active);
     if(active){center.hidden=true;if(loaderAnimation&&!reducedMotion)loaderAnimation.play();}
     else if(loaderAnimation)loaderAnimation.pause();
   }

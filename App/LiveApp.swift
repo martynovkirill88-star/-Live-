@@ -1039,6 +1039,7 @@ struct Watch: View {
     @ObservedObject private var downloads = OfflineLibrary.shared
     @State private var downloadMenu = false
     @State private var downloadList = false
+    @State private var slowPlayback = false
     @AppStorage("savedVideos") private var saved = ""
     @AppStorage("followedChannels") private var followed = ""
     @AppStorage("dislikedVideos") private var disliked = ""
@@ -1229,7 +1230,20 @@ struct Watch: View {
     var body: some View {
         ScrollView {
             if let offlineRecord, let url = downloads.assetURL(offlineRecord) { OfflineNativePlayer(url: url, id: video.id, quality: offlineRecord.quality) }
-            else { WebsitePlayer(video: video).aspectRatio(16 / 9, contentMode: .fit) }
+            else { WebsitePlayer(video: video, loadingHint: { slowPlayback = $0 }).aspectRatio(16 / 9, contentMode: .fit) }
+            if offlineRecord == nil && slowPlayback && !downloads.ready.isEmpty {
+                Button { downloadList = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.down.circle").font(.title2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Видео долго загружается?").font(.subheadline.weight(.semibold))
+                            Text("Посмотреть скачанные видео").font(.subheadline).foregroundStyle(lime)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption)
+                    }.padding(14).background(surface, in: RoundedRectangle(cornerRadius: 16))
+                }.buttonStyle(.plain).padding(.horizontal, 16).padding(.top, 12)
+            }
             VStack(alignment: .leading, spacing: 14) {
                 Text(video.title).font(.title2.bold())
                 Text(video.live ? "Прямой эфир" : "\(video.views ?? 0) просмотров").font(.caption).foregroundStyle(.secondary)
@@ -1376,11 +1390,12 @@ struct Watch: View {
 
 private struct WebsitePlayer: UIViewRepresentable {
     let video: Video
+    var loadingHint: (Bool) -> Void = { _ in }
     private static func needsSession(_ video: Video) -> Bool {
         video.publication_policy == "private" || video.published == false
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(video: video) }
+    func makeCoordinator() -> Coordinator { Coordinator(video: video, loadingHint: loadingHint) }
 
     func makeUIView(context: Context) -> UIView {
         let config = WKWebViewConfiguration()
@@ -1391,6 +1406,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         config.userContentController.add(context.coordinator, name: "playerOrientation")
         config.userContentController.add(context.coordinator, name: "playerWatched")
         config.userContentController.add(context.coordinator, name: "playerProgress")
+        config.userContentController.add(context.coordinator, name: "playerLoading")
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -1442,6 +1458,7 @@ private struct WebsitePlayer: UIViewRepresentable {
         coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerOrientation")
         coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerWatched")
         coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerProgress")
+        coordinator.player?.configuration.userContentController.removeScriptMessageHandler(forName: "playerLoading")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -1460,6 +1477,10 @@ private struct WebsitePlayer: UIViewRepresentable {
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame else { return }
+            if message.name == "playerLoading" {
+                if let visible = message.body as? Bool { loadingHint(visible) }
+                return
+            }
             if message.name == "playerWatched" { LocalDiscovery.record(video.id); return }
             if message.name == "playerProgress" {
                 guard !video.live, let data = message.body as? [String: Any],
@@ -1506,7 +1527,10 @@ private struct WebsitePlayer: UIViewRepresentable {
         }
         let video: Video
 
-        init(video: Video) { self.video = video }
+        let loadingHint: (Bool) -> Void
+        init(video: Video, loadingHint: @escaping (Bool) -> Void) {
+            self.video = video; self.loadingHint = loadingHint
+        }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             guard webView.url?.isFileURL == true || WebsitePlayer.needsSession(video) else { return }

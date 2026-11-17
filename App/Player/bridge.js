@@ -1,3 +1,16 @@
+// One timer per buffering episode; repeated waiting events do not postpone the hint.
+window.createSlowPlaybackHint = (notify, timers = window) => {
+ let timer=null,waiting=false;
+ return {
+  set(value){
+   if(value===waiting)return;waiting=value;
+   if(timer!==null){timers.clearTimeout(timer);timer=null;}
+   if(value)timer=timers.setTimeout(()=>{timer=null;if(waiting)notify(true);},10000);
+   else notify(false);
+  },
+  destroy(){if(timer!==null)timers.clearTimeout(timer);timer=null;waiting=false;notify(false);}
+ };
+};
 // Local media uses the same player controls as streaming video.
 window.attachOfflineMedia = (video,item) => {
  const state={position:0,duration:item.duration||0,paused:true,ready:false,muted:false,volume:1};
@@ -26,8 +39,13 @@ window.icon = name => '<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" 
 window.mountBundledPlayer = item => {
     window.activePlayer?.destroy();
     const root = document.getElementById('player');
+    const hint=window.createSlowPlaybackHint(value=>window.webkit?.messageHandlers.playerLoading?.postMessage(value));
+    window.onPlayerLoading=item.nativeOffline?null:value=>hint.set(value);
     window.activePlayer = window.createLivePlayer(root, item);
+    const destroy=window.activePlayer.destroy;
+    window.activePlayer.destroy=()=>{hint.destroy();destroy();};
     const video = root.querySelector('video');
+    if(!item.nativeOffline){video.addEventListener('error',()=>hint.set(true));video.addEventListener('playing',()=>hint.set(false));}
     let lastSent = 0;
     function saveProgress(finished, force) {
         if (item.live || !Number.isFinite(video.currentTime) || (!finished && video.currentTime < 0.5)) return;
