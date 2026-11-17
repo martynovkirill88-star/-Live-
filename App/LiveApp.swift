@@ -7,10 +7,10 @@ import CoreTransferable
 import Speech
 import AVFoundation
 
-private let appBackground = Color(red: 0.047, green: 0.071, blue: 0.067)
-private let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
-private let lime = Color(red: 0.792, green: 0.98, blue: 0.459)
-private let origin = URL(string: "https://live.chepushkavpn.fun/")!
+let appBackground = Color(red: 0.047, green: 0.071, blue: 0.067)
+let surface = Color(red: 0.106, green: 0.161, blue: 0.145)
+let lime = Color(red: 0.792, green: 0.98, blue: 0.459)
+let origin = URL(string: "https://live.chepushkavpn.fun/")!
 
 private enum VideoCategory: String, CaseIterable {
     case general, music, travel, kids
@@ -25,11 +25,12 @@ private enum VideoCategory: String, CaseIterable {
     }
 }
 
-private struct Video: Decodable, Identifiable, Hashable {
+struct Video: Codable, Identifiable, Hashable {
     let category: String?
-    struct Quality: Decodable, Hashable {
+    struct Quality: Codable, Hashable {
         let code: String
         let height: Int
+        let bitrate: Int?
     }
     let id, title, channel: String
     let channel_id, channel_avatar, poster, manifest, description: String?
@@ -56,19 +57,19 @@ private struct Channel: Decodable {
 }
 private enum Route: Hashable { case video(Video), channel(String) }
 
-private func remote(_ path: String?) -> URL? {
+func remote(_ path: String?) -> URL? {
     guard let path, !path.isEmpty, let url = URL(string: path, relativeTo: origin)?.absoluteURL,
           url.scheme == "https", url.host == origin.host else { return nil }
     return url
 }
 
-private struct ServerError: LocalizedError {
+struct ServerError: LocalizedError {
     let status: Int
     let message: String
     var errorDescription: String? { message }
 }
 
-private func request<T: Decodable>(
+func request<T: Decodable>(
     _ path: String, method: String = "GET", json: [String: Any]? = nil,
     bytes: Data? = nil, headers: [String: String] = [:], timeout: TimeInterval = 60
 ) async throws -> T {
@@ -91,7 +92,7 @@ private func request<T: Decodable>(
     }
     return try JSONDecoder().decode(T.self, from: data)
 }
-private func clock(_ seconds: Double) -> String {
+func clock(_ seconds: Double) -> String {
     let value = seconds.isFinite ? Int(max(0, seconds)) : 0
     return String(format: "%d:%02d", value / 60, value % 60)
 }
@@ -110,15 +111,18 @@ struct ChepushkaLiveApp: App {
     }
 }
 
-private struct Artwork: View {
+struct Artwork: View {
     let path: String?
     var body: some View {
         GeometryReader { geometry in
-            AsyncImage(url: remote(path)) { phase in
-                if let image = phase.image {
-                    image.resizable().scaledToFill()
+            Group {
+                if let file = OfflineLibrary.artwork(path), let image = UIImage(contentsOfFile: file.path) {
+                    Image(uiImage: image).resizable().scaledToFill()
                 } else {
-                    surface.overlay(Image(systemName: "play.rectangle").foregroundStyle(.secondary))
+                    AsyncImage(url: OfflineLibrary.shared.online ? remote(path) : nil) { phase in
+                        if let image = phase.image { image.resizable().scaledToFill() }
+                        else { surface.overlay(Image(systemName: "play.rectangle").foregroundStyle(.secondary)) }
+                    }
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
@@ -130,6 +134,7 @@ private struct Artwork: View {
 }
 
 private struct Home: View {
+    @ObservedObject private var downloads = OfflineLibrary.shared
     @EnvironmentObject private var auth: LiveSession
     @Environment(\.scenePhase) private var scenePhase
     @State private var ownerConsole = false
@@ -183,7 +188,7 @@ private struct Home: View {
                     headerButton("gearshape", label: "Настройки") { settings = true }
                     headerButton("magnifyingglass", label: "Поиск") { search = true }
                 }.padding(.horizontal, 16)
-                if tab == "Профиль" { CreatorHome() } else {
+                if !downloads.online || (failure && !downloads.ready.isEmpty) { DownloadedVideosView(embedded: true) } else if tab == "Профиль" { CreatorHome() } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         if tab == "Главная" {
@@ -241,6 +246,9 @@ private struct Home: View {
                 }
             }
             .task { await load() }
+            .onChange(of: downloads.online) { online in
+                if !online { path.removeAll() } else { Task { await load() } }
+            }
             .sheet(isPresented: $ownerConsole) { OwnerConsoleSheet() }
             .sheet(isPresented: $settings, onDismiss: {
                 if openOwnerAfterSettings { openOwnerAfterSettings = false; ownerConsole = true }
@@ -332,6 +340,7 @@ private struct Home: View {
     }
 
     private func load() async {
+        guard downloads.online else { return }
         failure = false
         do { let catalog: Catalog = try await request("/api/catalog"); videos = catalog.items }
         catch { failure = true }
@@ -389,6 +398,9 @@ private struct AccountSettings: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    NavigationLink { DownloadedVideosView() } label: { Label("Скачанные видео", systemImage: "arrow.down.to.line") }
+                }
                 if let account = auth.account {
                     Section(account.name) {
                         Button("Выйти из аккаунта", role: .destructive) {
@@ -986,8 +998,8 @@ private struct ChannelScreen: View {
     }
 }
 
-private struct WatchComments: Decodable {
-    struct Entry: Decodable, Identifiable {
+struct WatchComments: Codable {
+    struct Entry: Codable, Identifiable {
         let id: Int
         let can_delete: Bool?
         let name: String
@@ -999,7 +1011,7 @@ private struct WatchComments: Decodable {
 }
 
 
-private struct Watch: View {
+struct Watch: View {
     private struct Likes: Decodable {
         let liked: Bool
         let likes: Int
@@ -1010,6 +1022,10 @@ private struct Watch: View {
     @State private var sending = false
     let video: Video
     var others: [Video] = []
+    var offlineRecord: OfflineRecord? = nil
+    @ObservedObject private var downloads = OfflineLibrary.shared
+    @State private var downloadMenu = false
+    @State private var downloadList = false
     @AppStorage("savedVideos") private var saved = ""
     @AppStorage("followedChannels") private var followed = ""
     @AppStorage("dislikedVideos") private var disliked = ""
@@ -1049,6 +1065,7 @@ private struct Watch: View {
     }
 
     private func loadLikes() async {
+        if let offlineRecord { likes = Likes(liked: offlineRecord.liked, likes: offlineRecord.likes); return }
         let response: Likes? = try? await request("/api/media/" + video.id + "/social")
         if !Task.isCancelled && !changingLike, let response { likes = response }
     }
@@ -1080,19 +1097,28 @@ private struct Watch: View {
                 actionLabel(hasLiked ? "hand.thumbsup.fill" : "hand.thumbsup", selected: hasLiked, count: likes?.likes)
             }.accessibilityLabel(hasLiked ? "Убрать лайк" : "Нравится")
                 .accessibilityValue(likes.map { String($0.likes) } ?? "")
-                .disabled(changingLike)
+                .disabled(changingLike || offlineRecord != nil)
             Button {
                 guard auth.requireLogin() else { return }
                 Task { await changeLike(dislike: true) }
             } label: {
                 actionLabel(hasDisliked ? "hand.thumbsdown.fill" : "hand.thumbsdown", selected: hasDisliked)
-            }.accessibilityLabel("Не нравится").disabled(changingLike)
+            }.accessibilityLabel("Не нравится").disabled(changingLike || offlineRecord != nil)
             ShareLink(item: origin.appendingPathComponent("watch").appendingPathComponent(video.id)) {
                 actionLabel("arrowshape.turn.up.right")
             }.accessibilityLabel("Поделиться")
             Button { if auth.requireLogin() { saved = setting(saved, video.id, enabled: !isSaved) } } label: {
                 actionLabel(isSaved ? "bookmark.fill" : "bookmark", selected: isSaved)
-            }.accessibilityLabel(isSaved ? "Убрать из избранного" : "В избранное")
+            }.accessibilityLabel(isSaved ? "Убрать из избранного" : "В избранное").disabled(offlineRecord != nil)
+            if !video.live {
+                Button {
+                    if let item = downloads.records[video.id], ["ready", "preparing", "downloading"].contains(item.status) { downloadMenu = true }
+                    else { downloads.start(video) }
+                } label: {
+                    let item = downloads.records[video.id]
+                    actionLabel(item?.status == "ready" ? "arrow.down.circle.fill" : "arrow.down.to.line", selected: item?.status == "ready", count: item?.status == "downloading" ? Int((item?.progress ?? 0) * 100) : nil)
+                }.accessibilityLabel(downloads.records[video.id]?.status == "ready" ? "Видео скачано" : "Скачать видео")
+            }
         }.buttonStyle(.plain)
     }
 
@@ -1181,6 +1207,7 @@ private struct Watch: View {
     }
 
     private func loadComments() async {
+        if let offlineRecord { comments = offlineRecord.comments; return }
         commentsFailed = false
         do { comments = try await request("/api/media/" + video.id + "/comments") }
         catch { commentsFailed = true }
@@ -1188,7 +1215,8 @@ private struct Watch: View {
     @State private var expandedDescription = false
     var body: some View {
         ScrollView {
-            WebsitePlayer(video: video).aspectRatio(16 / 9, contentMode: .fit)
+            if let offlineRecord, let url = downloads.assetURL(offlineRecord) { OfflineNativePlayer(url: url, id: video.id) }
+            else { WebsitePlayer(video: video).aspectRatio(16 / 9, contentMode: .fit) }
             VStack(alignment: .leading, spacing: 14) {
                 Text(video.title).font(.title2.bold())
                 Text(video.live ? "Прямой эфир" : "\(video.views ?? 0) просмотров").font(.caption).foregroundStyle(.secondary)
@@ -1205,8 +1233,17 @@ private struct Watch: View {
                         }
                     }
                 }
-                if let id = video.channel_id { authorRow(id) }
+                if let id = video.channel_id { authorRow(id).disabled(offlineRecord != nil) }
                 actionRow
+                if let offlineRecord {
+                    Text("Без интернета · Данные сохранены " + offlineRecord.savedAt.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(.secondary)
+                } else if let item = downloads.records[video.id] {
+                    if ["preparing", "downloading"].contains(item.status) {
+                        ProgressView(value: item.progress)
+                        Text(item.status == "preparing" ? "Подготовка загрузки…" : "Скачивание · \(Int(item.progress * 100))%").font(.caption).foregroundStyle(.secondary)
+                    } else if item.status == "paused" { Text(item.error).font(.caption).foregroundStyle(.secondary) }
+                    else { Text("Скачано · " + ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file)).font(.caption).foregroundStyle(.secondary) }
+                }
                 if !likeError.isEmpty { Text(likeError).font(.caption).foregroundStyle(.secondary) }
                 Divider().padding(.top, 6)
                 commentsCard
@@ -1235,13 +1272,19 @@ private struct Watch: View {
         .task { await loadComments() }
         .task(id: auth.account?.name) { await loadLikes() }
         .task {
-            if let id = video.channel_id {
+            if offlineRecord == nil, let id = video.channel_id {
                 let channel: Channel? = try? await request("/api/channels/" + id)
                 subscribers = channel?.subscribers
                 authorIsOwner = channel?.is_owner
                 if channel?.is_owner == true { auth.setOwnedChannel(id) }
             }
         }
+        .confirmationDialog("Загрузка видео", isPresented: $downloadMenu, titleVisibility: .visible) {
+            Button("Скачанные видео") { downloadList = true }
+            Button(downloads.records[video.id]?.status == "ready" ? "Удалить загрузку" : "Отменить скачивание", role: .destructive) { downloads.remove(video.id) }
+            Button("Закрыть", role: .cancel) {}
+        }
+        .sheet(isPresented: $downloadList) { NavigationStack { DownloadedVideosView().toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { downloadList = false } } } } }
         .sheet(isPresented: $commentsOpen) {
             NavigationStack {
 
@@ -1257,7 +1300,7 @@ private struct Watch: View {
                                         Text(entry.name).font(.caption).foregroundStyle(.secondary)
                                         Text(entry.body)
                                     }.frame(maxWidth: .infinity, alignment: .leading)
-                                    if entry.can_delete == true {
+                                    if offlineRecord == nil && entry.can_delete == true {
                                         Button(role: .destructive) { commentToDelete = entry } label: {
                                             Image(systemName: "trash").frame(width: 44, height: 44).contentShape(Rectangle())
                                         }.buttonStyle(.plain).disabled(deletingComment)
@@ -1274,7 +1317,9 @@ private struct Watch: View {
                 .background(appBackground.ignoresSafeArea())
                 .safeAreaInset(edge: .bottom) {
                     VStack(alignment: .leading, spacing: 8) {
-                        if comments?.enabled == false {
+                        if offlineRecord != nil {
+                            Text("Сохранённые комментарии. Для ответа подключитесь к интернету.").font(.caption)
+                        } else if comments?.enabled == false {
                             Text("Комментарии отключены автором.").font(.caption)
                         } else if auth.account != nil {
                             HStack {
@@ -1482,7 +1527,11 @@ private struct WebsitePlayer: UIViewRepresentable {
 
 
 @MainActor
-private final class OrientationDelegate: NSObject, UIApplicationDelegate {
+final class OrientationDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        if identifier == OfflineLibrary.sessionID { OfflineLibrary.shared.backgroundCompletion = completionHandler }
+        else { completionHandler() }
+    }
     private static var mask: UIInterfaceOrientationMask = .portrait
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         Self.mask
@@ -1537,6 +1586,7 @@ private final class LiveSession: ObservableObject {
         for cookie in await webCookies.allCookies() where cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")) == origin.host {
             await webCookies.deleteCookie(cookie)
         }
+        OfflineLibrary.shared.clearPrivate()
         account = nil
         ownedChannelID = nil
         watchHistory = []
