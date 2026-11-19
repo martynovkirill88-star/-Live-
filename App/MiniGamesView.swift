@@ -34,7 +34,10 @@ private struct MiniGamesBrowser: UIViewRepresentable {
     private static let rules = #"""
     [
       {"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}},
-      {"trigger":{"url-filter":"^https://live[.]chepushkavpn[.]fun/api/android/mini-games(/([a-f0-9]{32})/(play|game|cover))?$"},"action":{"type":"ignore-previous-rules"}}
+      {"trigger":{"url-filter":"^https://live[.]chepushkavpn[.]fun/api/android/mini-games$"},"action":{"type":"ignore-previous-rules"}},
+      {"trigger":{"url-filter":"^https://live[.]chepushkavpn[.]fun/api/android/mini-games/[a-f0-9]+/play$"},"action":{"type":"ignore-previous-rules"}},
+      {"trigger":{"url-filter":"^https://live[.]chepushkavpn[.]fun/api/android/mini-games/[a-f0-9]+/game$"},"action":{"type":"ignore-previous-rules"}},
+      {"trigger":{"url-filter":"^https://live[.]chepushkavpn[.]fun/api/android/mini-games/[a-f0-9]+/cover$"},"action":{"type":"ignore-previous-rules"}}
     ]
     """#
     let onFailure: () -> Void
