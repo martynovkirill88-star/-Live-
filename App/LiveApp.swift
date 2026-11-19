@@ -454,6 +454,9 @@ private struct AccountSettings: View {
                     NavigationLink { DownloadedVideosView() } label: { Label("Скачанные видео", systemImage: "arrow.down.to.line") }
                     NavigationLink { AndroidTVSetupView() } label: { Label("Установка на Android TV", systemImage: "tv") }
                 }
+                Section("Бета") {
+                    NavigationLink { MiniGamesView() } label: { Label("Мини-игры", systemImage: "gamecontroller") }
+                }
                 if let account = auth.account {
                     Section(account.name) {
                         Button("Выйти из аккаунта", role: .destructive) {
