@@ -12,6 +12,7 @@ targets:
     platform: iOS
     sources:
       - App/LiveApp.swift
+      - App/MiniGamesView.swift
       - App/OfflineDownloads.swift
       - App/OfflineDownloadPolicy.swift
       - App/TVSetup.swift
