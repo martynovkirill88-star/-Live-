@@ -444,6 +444,7 @@ private struct AccountSettings: View {
     @EnvironmentObject private var auth: LiveSession
     @Environment(\.dismiss) private var dismiss
     let openOwner: () -> Void
+    @State private var showMiniGames = false
     @State private var busy = false
     @State private var error = ""
 
@@ -455,7 +456,16 @@ private struct AccountSettings: View {
                     NavigationLink { AndroidTVSetupView() } label: { Label("Установка на Android TV", systemImage: "tv") }
                 }
                 Section("Бета") {
-                    NavigationLink { MiniGamesView() } label: { Label("Мини-игры", systemImage: "gamecontroller") }
+                    Button {
+                        showMiniGames = true
+                    } label: {
+                        HStack {
+                            Label("Мини-игры", systemImage: "gamecontroller")
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
                 if let account = auth.account {
                     Section(account.name) {
@@ -481,10 +491,12 @@ private struct AccountSettings: View {
                 }
                 if !error.isEmpty { Text(error).foregroundStyle(.secondary) }
             }
+            .navigationDestination(isPresented: $showMiniGames) { MiniGamesView() }
             .navigationTitle("Настройки")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
         }
+        .interactiveDismissDisabled(showMiniGames)
     }
 }
 
