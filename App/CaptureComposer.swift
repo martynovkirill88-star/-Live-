@@ -97,7 +97,14 @@ struct CaptureComposer: View {
                 }
                 if Task.isCancelled { try? FileManager.default.removeItem(at: file.url); return }
                 attribution = nil
-                preview(file.url)
+                do {
+                    let prepared = try await CameraExport.prepareGallery(file.url)
+                    if Task.isCancelled { try? FileManager.default.removeItem(at: prepared); return }
+                    preview(prepared)
+                } catch {
+                    try? FileManager.default.removeItem(at: file.url)
+                    throw error
+                }
             } catch is CancellationError {} catch { self.error = "Не удалось открыть видео из галереи." }
         }
         .onReceive(timer) { _ in

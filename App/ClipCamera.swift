@@ -218,6 +218,16 @@ struct CameraSurface: UIViewRepresentable {
 }
 
 enum CameraExport {
+    @MainActor static func prepareGallery(_ url: URL) async throws -> URL {
+        let asset = AVURLAsset(url: url)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw CameraError.export }
+        let natural = try await track.load(.naturalSize)
+        let transform = try await track.load(.preferredTransform)
+        let oriented = CGRect(origin: .zero, size: natural).applying(transform).standardized.size
+        guard oriented.height > oriented.width else { return url }
+        return try await prepare(url, music: nil, mask: .none)
+    }
+
     @MainActor static func prepare(_ url: URL, music: URL?, mask: CameraMask) async throws -> URL {
         defer { try? FileManager.default.removeItem(at: url) }
         let source = AVURLAsset(url: url)
@@ -237,7 +247,11 @@ enum CameraExport {
                 try audio.insertTimeRange(CMTimeRange(start: audioRange.start, duration: audioDuration), of: originalAudio, at: .zero)
             }
         } else if music != nil { throw CameraError.export }
-        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality)
+        let natural = try await original.load(.naturalSize)
+        let oriented = CGRect(origin: .zero, size: natural).applying(video.preferredTransform).standardized.size
+        let preset = oriented.height > oriented.width && oriented.height > 1080
+            ? AVAssetExportPreset960x540 : AVAssetExportPresetHighestQuality
+        guard let exporter = AVAssetExportSession(asset: composition, presetName: preset)
         else { throw CameraError.export }
         do {
             let sticker = mask.artwork.flatMap { CIImage(image: $0) }
