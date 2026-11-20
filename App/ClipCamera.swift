@@ -2,9 +2,11 @@ import SwiftUI
 import AVFoundation
 import CoreImage
 
-final class ClipCamera: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
+final class ClipCamera: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVCaptureMetadataOutputObjectsDelegate {
     let session = AVCaptureSession()
     let output = AVCaptureMovieFileOutput()
+    private let faces = AVCaptureMetadataOutput()
+    @Published private(set) var face: AVMetadataFaceObject?
     @Published private(set) var ready = false
     @Published private(set) var recording = false
     @Published private(set) var issue: String?
@@ -29,6 +31,13 @@ final class ClipCamera: NSObject, ObservableObject, AVCaptureFileOutputRecording
                     try self.installCamera(self.position)
                     guard self.session.canAddOutput(self.output) else { throw CameraError.unavailable }
                     self.session.addOutput(self.output)
+                    if self.session.canAddOutput(self.faces) {
+                        self.session.addOutput(self.faces)
+                        self.faces.setMetadataObjectsDelegate(self, queue: .main)
+                        if self.faces.availableMetadataObjectTypes.contains(.face) {
+                            self.faces.metadataObjectTypes = [.face]
+                        }
+                    }
                 }
                 if !self.session.isRunning { self.session.startRunning() }
                 DispatchQueue.main.async { self.ready = true }
@@ -62,6 +71,7 @@ final class ClipCamera: NSObject, ObservableObject, AVCaptureFileOutputRecording
     }
 
     func flip() {
+        face = nil
         queue.async {
             guard self.session.isRunning, !self.output.isRecording else { return }
             self.session.beginConfiguration()
@@ -121,9 +131,17 @@ final class ClipCamera: NSObject, ObservableObject, AVCaptureFileOutputRecording
 
     func shutdown() {
         ready = false
+        face = nil
         queue.async {
             if self.output.isRecording { self.output.stopRecording() }
             if self.session.isRunning { self.session.stopRunning() }
+        }
+    }
+
+    func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject],
+                        from connection: AVCaptureConnection) {
+        face = objects.compactMap { $0 as? AVMetadataFaceObject }.max {
+            $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height
         }
     }
 
@@ -156,6 +174,7 @@ enum CameraError: LocalizedError {
 
 struct CameraSurface: UIViewRepresentable {
     let session: AVCaptureSession
+    let catFace: AVMetadataFaceObject?
     func makeUIView(context: Context) -> Surface {
         let view = Surface()
         view.preview.session = session
@@ -165,10 +184,34 @@ struct CameraSurface: UIViewRepresentable {
         }
         return view
     }
-    func updateUIView(_ uiView: Surface, context: Context) {}
+    func updateUIView(_ uiView: Surface, context: Context) {
+        uiView.face = catFace
+        uiView.setNeedsLayout()
+    }
     final class Surface: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var preview: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+        var face: AVMetadataFaceObject?
+        private let sticker = UILabel()
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            if sticker.superview == nil {
+                sticker.text = "🐱"
+                sticker.textAlignment = .center
+                sticker.isUserInteractionEnabled = false
+                addSubview(sticker)
+            }
+            guard let face, let mapped = preview.transformedMetadataObject(for: face) else {
+                sticker.isHidden = true
+                return
+            }
+            let side = max(mapped.bounds.width, mapped.bounds.height) * 1.2
+            sticker.font = .systemFont(ofSize: side * 0.76)
+            sticker.frame = CGRect(x: mapped.bounds.midX - side / 2, y: mapped.bounds.midY - side / 2,
+                                   width: side, height: side)
+            sticker.isHidden = false
+        }
     }
 }
 
@@ -197,6 +240,7 @@ enum CameraExport {
         else { throw CameraError.export }
         if mask != .none {
             let sticker = mask.symbol.flatMap(makeSticker)
+            let faces = mask == .cat ? ExportFaceTracker() : nil
             exporter.videoComposition = AVVideoComposition(asset: composition, applyingCIFiltersWithHandler: { request in
                 let bounds = request.sourceImage.extent
                 var image = request.sourceImage
@@ -205,10 +249,14 @@ enum CameraExport {
                     image = image.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.55]).cropped(to: bounds)
                 }
                 if let sticker {
-                    let size = bounds.width * 0.19
-                    let scaled = sticker.transformed(by: CGAffineTransform(scaleX: size / sticker.extent.width, y: size / sticker.extent.height))
-                    let positioned = scaled.transformed(by: CGAffineTransform(translationX: bounds.midX - size / 2, y: bounds.midY - size / 2))
-                    image = positioned.composited(over: image).cropped(to: bounds)
+                    let face = faces?.bounds(in: image, at: request.compositionTime)
+                    if faces == nil || face != nil {
+                        let size = face.map { max($0.width, $0.height) * 1.2 } ?? bounds.width * 0.19
+                        let center = face ?? bounds
+                        let scaled = sticker.transformed(by: CGAffineTransform(scaleX: size / sticker.extent.width, y: size / sticker.extent.height))
+                        let positioned = scaled.transformed(by: CGAffineTransform(translationX: center.midX - size / 2, y: center.midY - size / 2))
+                        image = positioned.composited(over: image).cropped(to: bounds)
+                    }
                 }
                 request.finish(with: image, context: nil)
             })
@@ -232,5 +280,27 @@ enum CameraExport {
                 withAttributes: [.font: UIFont.systemFont(ofSize: 78)])
         }
         return CIImage(image: image)
+    }
+}
+
+
+private final class ExportFaceTracker {
+    private let lock = NSLock()
+    private let detector = CIDetector(ofType: CIDetectorTypeFace, context: CIContext(),
+                                      options: [CIDetectorAccuracy: CIDetectorAccuracyLow])
+    private var sample = -1.0
+    private var face: CGRect?
+
+    func bounds(in image: CIImage, at time: CMTime) -> CGRect? {
+        lock.lock()
+        defer { lock.unlock() }
+        let seconds = CMTimeGetSeconds(time)
+        if abs(seconds - sample) > 0.13 {
+            sample = seconds
+            face = detector?.features(in: image).map(\.bounds).max {
+                $0.width * $0.height < $1.width * $1.height
+            }
+        }
+        return face
     }
 }

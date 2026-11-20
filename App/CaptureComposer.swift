@@ -39,8 +39,10 @@ struct CaptureComposer: View {
                     reviewActions(movie)
                 } else {
                     if camera.ready {
-                        CameraSurface(session: camera.session).ignoresSafeArea()
-                        if let symbol = mask.symbol {
+                        CameraSurface(session: camera.session, catFace: mask == .cat ? camera.face : nil)
+                            .saturation(mask == .retro ? 0.72 : (mask == .neon ? 1.48 : 1))
+                            .ignoresSafeArea()
+                        if mask != .cat, let symbol = mask.symbol {
                             Text(symbol).font(.system(size: geometry.size.width * 0.19))
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .allowsHitTesting(false).accessibilityHidden(true)
@@ -354,6 +356,5 @@ private struct CameraTrack: Identifiable, Equatable {
         ["Медленный свет", "После дождя", "Высота", "Держи ритм", "В этом городе"],
         ["2:48", "3:16", "2:37", "3:04", "2:59"]
     ).enumerated().map { CameraTrack(id: $0.offset, title: $0.element.0, duration: $0.element.1) }
-    var color: Color { [.orange, .cyan, .purple, .yellow, .pink][id] }
     var url: URL? { Bundle.main.url(forResource: "track-\(id)", withExtension: "m4a", subdirectory: "CameraMusic") }
 }
