@@ -138,6 +138,7 @@ private struct Home: View {
     @EnvironmentObject private var auth: LiveSession
     @Environment(\.scenePhase) private var scenePhase
     @State private var ownerConsole = false
+    @State private var cameraFromDock = false
     @State private var settings = false
     @State private var openOwnerAfterSettings = false
     @State private var history = false
@@ -154,7 +155,7 @@ private struct Home: View {
     @State private var tab = "Главная"
     @GestureState private var dockDragX: CGFloat?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private let dockTabs = ["Главная", "Эфиры", "Подписки", "Профиль"]
+    private let dockTabs = ["Главная", "Клипы", "Снять", "Канал"]
     @State private var filter = "Всё"
     @State private var search = false
     @State private var path: [Route] = []
@@ -187,6 +188,7 @@ private struct Home: View {
     var body: some View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
+                if tab != "Клипы" {
                 HStack {
                     Image("BrandMark").resizable().scaledToFit()
                         .frame(width: 34, height: 34).clipShape(RoundedRectangle(cornerRadius: 8))
@@ -196,6 +198,7 @@ private struct Home: View {
                     headerButton("gearshape", label: "Настройки") { settings = true }
                     headerButton("magnifyingglass", label: "Поиск") { search = true }
                 }.padding(.horizontal, 16)
+                }
                 if !downloads.online || (failure && !downloads.ready.isEmpty) {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 14) {
@@ -209,7 +212,14 @@ private struct Home: View {
                             }
                         }.padding(16)
                     }
-                } else if tab == "Профиль" { CreatorHome() } else {
+                } else if tab == "Канал" {
+                    CreatorHome()
+                } else if tab == "Клипы" {
+                    ClipsFeed(videos: videos.filter {
+                        !$0.live && $0.status == "ready" && ($0.duration ?? 0) > 0 &&
+                        ($0.duration ?? .infinity) <= 120 && $0.manifest != nil
+                    }, goHome: { selectTab("Главная") }, openCamera: { selectTab("Снять") })
+                } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         if tab == "Главная" {
@@ -277,6 +287,9 @@ private struct Home: View {
             .onChange(of: downloads.online) { online in
                 if !online { path.removeAll() } else { Task { await load(); await resetFeed() } }
             }
+            .fullScreenCover(isPresented: $cameraFromDock) {
+                CameraPublicationFlow(channel: auth.account?.name ?? "")
+            }
             .sheet(isPresented: $ownerConsole) { OwnerConsoleSheet() }
             .sheet(isPresented: $settings, onDismiss: {
                 if openOwnerAfterSettings { openOwnerAfterSettings = false; ownerConsole = true }
@@ -305,9 +318,9 @@ private struct Home: View {
             let highlighted = dockDragX.map { dockTabs[dockIndex(at: $0, width: geometry.size.width)] } ?? tab
             HStack(spacing: 0) {
                 tabButton("Главная", "house", highlighted: highlighted)
-                tabButton("Эфиры", "dot.radiowaves.left.and.right", highlighted: highlighted)
-                tabButton("Подписки", "play.rectangle.on.rectangle", highlighted: highlighted)
-                tabButton("Профиль", "person.crop.circle", highlighted: highlighted)
+                tabButton("Клипы", "play.rectangle", highlighted: highlighted)
+                tabButton("Снять", "video.badge.plus", highlighted: highlighted)
+                tabButton("Канал", "person.crop.circle", highlighted: highlighted)
             }
             .background(alignment: .leading) {
                 Capsule().fill(lime.opacity(0.15))
@@ -335,7 +348,13 @@ private struct Home: View {
     }
 
     private func selectTab(_ title: String) {
-        tab = title
+        if title == "Снять" {
+            guard auth.requireLogin() else { return }
+            if auth.account?.can_publish == true { cameraFromDock = true }
+            else { tab = "Канал" }
+        } else {
+            tab = title
+        }
     }
 
     @ViewBuilder

@@ -16,6 +16,9 @@ struct CaptureComposer: View {
     @State private var mask = CameraMask.none
     @State private var chosen: CameraTrack?
     @State private var sample: CameraTrack?
+    @State private var library: [CameraTrack] = []
+    @State private var query = ""
+    @State private var catalogStatus = ""
     @State private var sampling = false
     @State private var player: AVPlayer?
     @State private var movie: URL?
@@ -23,7 +26,7 @@ struct CaptureComposer: View {
     @State private var working = false
     @State private var error: String?
     let onReady: (URL, String?) -> Void
-    private enum Panel { case music, masks }
+    private enum Panel: Equatable { case music, masks }
     private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     private let background = Color(red: 0.063, green: 0.071, blue: 0.075)
 
@@ -77,7 +80,13 @@ struct CaptureComposer: View {
         }
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
-        .task { await camera.activate() }
+         .task { await camera.activate() }
+        .task(id: panel) {
+            guard panel == .music, library.isEmpty else { return }
+            catalogStatus = "Загружаем каталог…"
+            do { library = try await CameraTrack.loadLibrary(); catalogStatus = "" }
+            catch { if !Task.isCancelled { catalogStatus = "Онлайн-каталог недоступен. Доступны встроенные треки." } }
+        }
         .task(id: gallery) {
             guard let gallery else { return }
             working = true
@@ -242,9 +251,14 @@ struct CaptureComposer: View {
                     }
                 }
             } else {
+                TextField("Найти трек", text: $query)
+                    .padding(9).background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                if !catalogStatus.isEmpty { Text(catalogStatus).font(.caption) }
                 ScrollView {
-                    VStack(spacing: 6) {
-                        ForEach(CameraTrack.catalog) { track in
+                    LazyVStack(spacing: 6) {
+                        ForEach((CameraTrack.catalog + library).filter {
+                            query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)
+                        }) { track in
                             Button { sampleTrack(track) } label: {
                                 HStack(spacing: 10) {
                                     cameraArtwork("art-\(track.id % 5)", fallback: "record.circle.fill")
@@ -309,7 +323,6 @@ struct CaptureComposer: View {
         if camera.recording { camera.stop(); return }
         let track = chosen
         let effectCredit = mask.artwork == nil ? nil : CameraMask.credit
-        let music = track?.url
         let credits = [track?.attribution, effectCredit].compactMap { $0 }
         attribution = credits.isEmpty ? nil : credits.joined(separator: "\n\n")
         let effect = mask
@@ -317,18 +330,28 @@ struct CaptureComposer: View {
         elapsed = 0
         Task {
             do {
-                try await camera.record(seconds: seconds, microphone: music == nil) { result in
+                let music = try await track?.recordingFile()
+                let temporary = track?.filename != nil ? music : nil
+                do {
+                    try await camera.record(seconds: seconds, microphone: track == nil) { result in
                     player?.pause()
                     player = nil
                     working = true
                     Task {
-                        defer { working = false }
+                        defer {
+                            working = false
+                            if let temporary { try? FileManager.default.removeItem(at: temporary) }
+                        }
                         do {
                             let url = try result.get()
                             let edited = try await CameraExport.prepare(url, music: music, mask: effect)
                             preview(edited)
                         } catch { self.error = "Не удалось сохранить запись. " + error.localizedDescription }
                     }
+                }
+                } catch {
+                    if let temporary { try? FileManager.default.removeItem(at: temporary) }
+                    throw error
                 }
                 if let music {
                     player = AVPlayer(url: music)
@@ -407,6 +430,7 @@ private struct CameraTrack: Identifiable, Equatable {
     let title: String
     let duration: String
     var source: String? = nil
+    var filename: String? = nil
     static let catalog = zip(
         ["Медленный свет", "После дождя", "Высота", "Держи ритм", "В этом городе"],
         ["2:48", "3:16", "2:37", "3:04", "2:59"]
@@ -419,5 +443,44 @@ private struct CameraTrack: Identifiable, Equatable {
         guard let source else { return nil }
         return "Музыка: \(title) — Kevin MacLeod (incompetech.com). Фрагмент синхронизирован с видео. CC BY 4.0: https://creativecommons.org/licenses/by/4.0/\nhttps://incompetech.com/music/royalty-free/index.html?isrc=\(source)"
     }
-    var url: URL? { Bundle.main.url(forResource: "track-\(id)", withExtension: "m4a", subdirectory: "CameraMusic") }
+    private static let base = URL(string: "https://incompetech.com/music/royalty-free/")!
+    var url: URL? {
+        if let filename { return Self.base.appendingPathComponent("mp3-royaltyfree").appendingPathComponent(filename) }
+        return Bundle.main.url(forResource: "track-\(id)", withExtension: "m4a", subdirectory: "CameraMusic")
+    }
+
+    private struct Entry: Decodable {
+        let title, filename, length, isrc: String?
+    }
+
+    static func loadLibrary() async throws -> [Self] {
+        let (data, response) = try await URLSession.shared.data(from: base.appendingPathComponent("pieces.json"))
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        var used = Set(catalog.compactMap(\.source))
+        let entries = try JSONDecoder().decode([Entry].self, from: data)
+        return entries.enumerated().compactMap { index, entry in
+            guard let title = entry.title, let filename = entry.filename, !filename.contains("/"),
+                  !filename.contains("\\"), filename.lowercased().hasSuffix(".mp3"),
+                  let code = entry.isrc,
+                  code.range(of: "^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$", options: .regularExpression) != nil,
+                  let length = entry.length else { return nil }
+            let parts = length.split(separator: ":").compactMap { Int($0) }
+            guard parts.count == 3, (parts[0] * 3600 + parts[1] * 60 + parts[2]) >= 120,
+                  used.insert(code).inserted else { return nil }
+            return Self(id: index + catalog.count, title: title, duration: String(length.dropFirst(3)), source: code, filename: filename)
+        }
+    }
+
+    func recordingFile() async throws -> URL {
+        guard let url else { throw URLError(.fileDoesNotExist) }
+        guard filename != nil else { return url }
+        let (download, response) = try await URLSession.shared.download(from: url)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.mimeType?.hasPrefix("audio/") == true,
+              let size = try download.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              (1...25_000_000).contains(size) else { throw URLError(.badServerResponse) }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp3")
+        try FileManager.default.moveItem(at: download, to: file)
+        return file
+    }
 }
