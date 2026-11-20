@@ -6,7 +6,8 @@ struct ClipsFeed: View {
     let videos: [Video]
     let goHome: () -> Void
     let openCamera: () -> Void
-    @EnvironmentObject private var auth: LiveSession
+    let signedIn: Bool
+    let requireLogin: () -> Bool
     @State private var index = 0
     @State private var player: AVPlayer?
     @State private var progress = 0.0
@@ -126,7 +127,7 @@ struct ClipsFeed: View {
     private func actions(_ clip: Video) -> some View {
         VStack(spacing: 14) {
             Button {
-                guard auth.requireLogin(), !reacting else { return }
+                guard requireLogin(), !reacting else { return }
                 reacting = true
                 Task {
                     defer { reacting = false }
@@ -184,7 +185,7 @@ struct ClipsFeed: View {
                     Button {
                         let body = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !body.isEmpty, !sending else { return }
-                        if auth.account == nil { showingComments = false; _ = auth.requireLogin(); return }
+                        if !signedIn { showingComments = false; _ = requireLogin(); return }
                         sending = true
                         Task {
                             defer { sending = false }
