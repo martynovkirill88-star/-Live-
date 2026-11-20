@@ -234,6 +234,7 @@ private struct Home: View {
                     }, goHome: { selectTab("Главная") }, openCamera: { selectTab("Снять") },
                        signedIn: auth.account != nil, requireLogin: auth.requireLogin,
                        ownedChannelID: auth.ownedChannelID, cameraPresented: cameraFromDock)
+                    .task { await load() }
                 } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -302,7 +303,7 @@ private struct Home: View {
             .onChange(of: downloads.online) { online in
                 if !online { path.removeAll() } else { Task { await load(); await resetFeed() } }
             }
-            .fullScreenCover(isPresented: $cameraFromDock) {
+            .fullScreenCover(isPresented: $cameraFromDock, onDismiss: { Task { await load() } }) {
                 CameraPublicationFlow(channel: auth.account?.name ?? "")
             }
             .sheet(isPresented: $ownerConsole) { OwnerConsoleSheet() }
@@ -1109,6 +1110,7 @@ private struct ChannelScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .task { await load() }
+        .refreshable { await load() }
     }
     private func load() async {
         failure = false

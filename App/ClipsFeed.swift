@@ -92,7 +92,7 @@ struct ClipsFeed: View {
         }
         .clipped()
         .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 35).onEnded { gesture in
+        .simultaneousGesture(DragGesture(minimumDistance: 35).onEnded { gesture in
             let y = gesture.translation.height
             guard abs(y) > abs(gesture.translation.width), abs(y) > 45 else { return }
             let next = clipIndex + (y < 0 ? 1 : -1)
@@ -114,6 +114,7 @@ struct ClipsFeed: View {
                 player = nil
                 return
             }
+            selectedClipID = clip.id
             url.queryItems = [URLQueryItem(name: "quality", value: quality.code)]
             guard let stream = url.url else { player = nil; return }
             let current = AVPlayer(url: stream)
