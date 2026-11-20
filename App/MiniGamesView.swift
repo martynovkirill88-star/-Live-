@@ -50,7 +50,10 @@ private struct MiniGamesBrowser: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.bounces = false
+        webView.scrollView.alwaysBounceHorizontal = false
+        webView.scrollView.isDirectionalLockEnabled = true
         webView.isOpaque = false
         webView.backgroundColor = .clear
 
@@ -91,6 +94,11 @@ private struct MiniGamesBrowser: UIViewRepresentable {
                 url.path.range(of: "^" + prefix + "/[a-f0-9]{32}/" + suffix + "$",
                                options: .regularExpression) != nil
             decisionHandler(allowed ? .allow : .cancel)
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            // The embedded game receives touches without scrolling the surrounding page.
+            webView.scrollView.isScrollEnabled = webView.url?.lastPathComponent != "play"
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
