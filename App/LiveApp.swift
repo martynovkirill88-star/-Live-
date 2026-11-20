@@ -232,7 +232,7 @@ private struct Home: View {
                     ClipsFeed(videos: videos.filter {
                         !$0.live && $0.status == "ready" && $0.portraitQuality != nil && $0.manifest != nil
                     }, goHome: { selectTab("Главная") }, openCamera: { selectTab("Снять") },
-                       signedIn: auth.account != nil, requireLogin: auth.requireLogin)
+                       signedIn: auth.account != nil, requireLogin: auth.requireLogin, ownedChannelID: auth.ownedChannelID)
                 } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -2937,7 +2937,7 @@ private struct ClipFromChannel: View {
     @EnvironmentObject private var auth: LiveSession
     var body: some View {
         ClipsFeed(videos: [video], goHome: { dismiss() }, openCamera: nil,
-                  signedIn: auth.account != nil, requireLogin: auth.requireLogin)
+                  signedIn: auth.account != nil, requireLogin: auth.requireLogin, ownedChannelID: auth.ownedChannelID)
     }
 }
 

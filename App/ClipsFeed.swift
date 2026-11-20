@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import Photos
 
 struct ClipsFeed: View {
     let videos: [Video]
@@ -8,7 +9,10 @@ struct ClipsFeed: View {
     let openCamera: (() -> Void)?
     let signedIn: Bool
     let requireLogin: () -> Bool
+    let ownedChannelID: String?
     @State private var index = 0
+    @State private var savingVideo = false
+    @State private var shareNotice: String?
     @State private var player: AVPlayer?
     @State private var progress = 0.0
     @State private var comments: WatchComments?
@@ -104,6 +108,11 @@ struct ClipsFeed: View {
             }
         }
         .onDisappear { player?.pause() }
+        .alert("Поделиться", isPresented: Binding(
+            get: { shareNotice != nil }, set: { if !$0 { shareNotice = nil } }
+        )) {
+            Button("OK") { shareNotice = nil }
+        } message: { Text(shareNotice ?? "") }
         .sheet(isPresented: $showingComments) {
             if let clip {
                 commentPanel(clip)
@@ -142,10 +151,54 @@ struct ClipsFeed: View {
             Button { showingComments = true } label: {
                 actionLabel("bubble", comments?.total)
             }.accessibilityLabel("Комментарии")
-            ShareLink(item: origin.appendingPathComponent("watch").appendingPathComponent(clip.id)) {
-                actionLabel("square.and.arrow.up", nil)
-            }.accessibilityLabel("Поделиться")
+            let link = origin.appendingPathComponent("watch").appendingPathComponent(clip.id)
+            if let channel = clip.channel_id, ownedChannelID == channel {
+                Menu {
+                    Button("Копировать ссылку", systemImage: "link") {
+                        UIPasteboard.general.url = link
+                        shareNotice = "Ссылка скопирована."
+                    }
+                    Button("Скачать видео", systemImage: "arrow.down.to.line") {
+                        Task { await saveVideo(clip) }
+                    }.disabled(savingVideo)
+                } label: {
+                    if savingVideo { ProgressView().frame(width: 52, height: 48) }
+                    else { actionLabel("square.and.arrow.up", nil) }
+                }.accessibilityLabel("Поделиться")
+            } else {
+                ShareLink(item: link) { actionLabel("square.and.arrow.up", nil) }
+                    .accessibilityLabel("Поделиться")
+            }
         }.buttonStyle(.plain)
+    }
+
+    @MainActor private func saveVideo(_ clip: Video) async {
+        guard !savingVideo, let url = remote("/api/admin/media/" + clip.id + "/download-clip") else { return }
+        savingVideo = true
+        defer { savingVideo = false }
+        let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard authorization == .authorized || authorization == .limited else {
+            shareNotice = "Разрешите приложению добавлять видео в «Фото» в настройках iPhone."
+            return
+        }
+        do {
+            let request = URLRequest(url: url, timeoutInterval: 300)
+            let (download, response) = try await URLSession.shared.download(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  http.mimeType == "video/mp4" else {
+                throw ServerError(status: (response as? HTTPURLResponse)?.statusCode ?? 0,
+                                  message: "Не удалось скачать клип. Проверьте вход и повторите.")
+            }
+            let movie = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+            try FileManager.default.moveItem(at: download, to: movie)
+            defer { try? FileManager.default.removeItem(at: movie) }
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: movie)
+            }
+            shareNotice = "Клип сохранён в «Фото»."
+        } catch {
+            shareNotice = error.localizedDescription
+        }
     }
 
     private func actionLabel(_ icon: String, _ count: Int?) -> some View {
