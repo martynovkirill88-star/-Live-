@@ -491,12 +491,21 @@ private struct AccountSettings: View {
                 }
                 if !error.isEmpty { Text(error).foregroundStyle(.secondary) }
             }
-            .navigationDestination(isPresented: $showMiniGames) { MiniGamesView() }
+
             .navigationTitle("Настройки")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
         }
-        .interactiveDismissDisabled(showMiniGames)
+        .fullScreenCover(isPresented: $showMiniGames) {
+            NavigationStack {
+                MiniGamesView()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Назад") { showMiniGames = false }
+                        }
+                    }
+            }
+        }
     }
 }
 

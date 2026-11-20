@@ -50,6 +50,7 @@ private struct MiniGamesBrowser: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.scrollView.bounces = false
         webView.isOpaque = false
         webView.backgroundColor = .clear
 
