@@ -232,7 +232,8 @@ private struct Home: View {
                     ClipsFeed(videos: videos.filter {
                         !$0.live && $0.status == "ready" && $0.portraitQuality != nil && $0.manifest != nil
                     }, goHome: { selectTab("Главная") }, openCamera: { selectTab("Снять") },
-                       signedIn: auth.account != nil, requireLogin: auth.requireLogin, ownedChannelID: auth.ownedChannelID)
+                       signedIn: auth.account != nil, requireLogin: auth.requireLogin,
+                       ownedChannelID: auth.ownedChannelID, cameraPresented: cameraFromDock)
                 } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -1035,7 +1036,7 @@ private struct ChannelScreen: View {
     @State private var failure = false
     @State private var about = false
     @State private var showClips = false
-    @State private var selectedClip: Video?
+    @State private var selectedClip: ChannelClipSelection?
     @AppStorage("followedChannels") private var followed = ""
     private var subscribed: Bool { followed.split(separator: ",").contains(Substring(id)) }
 
@@ -1101,8 +1102,8 @@ private struct ChannelScreen: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(appBackground.ignoresSafeArea())
-        .fullScreenCover(item: $selectedClip) { video in
-            ClipFromChannel(video: video)
+        .fullScreenCover(item: $selectedClip, onDismiss: { Task { await load() } }) { selection in
+            ClipFromChannel(selection: selection)
         }
         .navigationTitle(channel?.profile.name ?? "Канал")
         .navigationBarTitleDisplayMode(.inline)
@@ -2012,7 +2013,7 @@ private struct CreatorHome: View {
     @State private var editing = false
     @State private var publishing = false
     @State private var showClips = false
-    @State private var selectedClip: Video?
+    @State private var selectedClip: ChannelClipSelection?
     @State private var name = ""
     @State private var about = ""
     @State private var error = ""
@@ -2146,7 +2147,9 @@ private struct CreatorHome: View {
             let reason = video.moderation_note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             Text(reason.isEmpty ? "Модератор не указал причину." : reason)
         }
-        .fullScreenCover(item: $selectedClip) { video in ClipFromChannel(video: video) }
+        .fullScreenCover(item: $selectedClip, onDismiss: { Task { await refreshVideos() } }) { selection in
+            ClipFromChannel(selection: selection)
+        }
         .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await refreshVideos() } }) {
             CameraPublicationFlow(channel: profile?.name ?? "")
         }
@@ -2494,23 +2497,39 @@ private struct EditPublishedVideo: View {
     }
 }
 
+private let publicationSourceEndpoint = "/api/admin/publication-source"
+
 private struct CameraPublicationFlow: View {
     let channel: String
+    @EnvironmentObject private var auth: LiveSession
+    @State private var linkAvailable = false
+    @State private var choosingLink = false
     @State private var movie: URL?
     @State private var isClip = false
     @State private var musicCredit: String?
+    private struct SourceCapability: Decodable { let available: Bool }
 
     var body: some View {
-        if let movie {
-            PublishVideo(channel: channel, initialMovie: movie, musicCredit: musicCredit, isClip: isClip)
-        } else {
-            CaptureComposer { url, credit in
-                Task {
-                    isClip = (try? await CameraExport.isPortrait(url)) == true
-                    musicCredit = credit
-                    movie = url
-                }
+        Group {
+            if let movie {
+                PublishVideo(channel: channel, initialMovie: movie, musicCredit: musicCredit, isClip: isClip)
+            } else if choosingLink, linkAvailable, auth.account?.role == "admin" {
+                PublishVideo(channel: channel, backToCamera: { choosingLink = false })
+            } else {
+                CaptureComposer(onReady: { url, credit in
+                    Task {
+                        isClip = (try? await CameraExport.isPortrait(url)) == true
+                        musicCredit = credit
+                        movie = url
+                    }
+                }, onLink: linkAvailable && auth.account?.role == "admin" ? { choosingLink = true } : nil)
             }
+        }
+        .task(id: auth.account?.role) {
+            linkAvailable = false
+            guard auth.account?.role == "admin" else { return }
+            let capability: SourceCapability? = try? await request(publicationSourceEndpoint)
+            if !Task.isCancelled { linkAvailable = capability?.available == true }
         }
     }
 }
@@ -2527,6 +2546,7 @@ private struct PublishVideo: View {
     struct Transfer: Decodable { let id: String; let offset, chunk_size: Int }
     let channel: String
     let isClip: Bool
+    private let backToCamera: (() -> Void)?
     @State private var musicCredit: String?
     @Environment(\.dismiss) private var dismiss
     @State private var selection: PhotosPickerItem?
@@ -2541,16 +2561,15 @@ private struct PublishVideo: View {
     @State private var transfer: Transfer?
     @State private var submitted = false
     @EnvironmentObject private var auth: LiveSession
-    @State private var linkAvailable = false
     @State private var videoLink = ""
     @State private var linkPreview: LinkPreview?
-    private let sourceEndpoint = "/api/admin/publication-source"
-    private struct SourceCapability: Decodable { let available: Bool }
     private struct LinkPreview: Decodable { let title, description: String; let thumbnail: URL }
     private struct ImportJob: Decodable { let status: String; let error: String? }
-    init(channel: String, initialMovie: URL? = nil, musicCredit: String? = nil, isClip: Bool = false) {
+    init(channel: String, initialMovie: URL? = nil, musicCredit: String? = nil, isClip: Bool = false,
+         backToCamera: (() -> Void)? = nil) {
         self.channel = channel
         self.isClip = isClip
+        self.backToCamera = backToCamera
         _musicCredit = State(initialValue: musicCredit)
         _file = State(initialValue: initialMovie)
         _title = State(initialValue: isClip ? "Клип" : (initialMovie == nil ? "" : "Новое видео"))
@@ -2560,8 +2579,13 @@ private struct PublishVideo: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            creatorHeader("Новое видео", icon: !hasVideo ? "xmark" : "chevron.left", disabled: busy || importing) {
-                if !hasVideo || submitted { clearMovie(); dismiss() }
+            creatorHeader("Новое видео", icon: !hasVideo && backToCamera == nil ? "xmark" : "chevron.left",
+                          disabled: busy || importing) {
+                if submitted { clearMovie(); dismiss() }
+                else if !hasVideo {
+                    if let backToCamera { backToCamera() }
+                    else { clearMovie(); dismiss() }
+                }
                 else {
                     clearMovie()
                     selection = nil
@@ -2582,7 +2606,9 @@ private struct PublishVideo: View {
                             Capsule().fill(lime).frame(height: 2)
                             Capsule().fill(!hasVideo ? surface : lime).frame(height: 2)
                         }
-                        if hasVideo { details(file?.lastPathComponent ?? "YouTube") } else { picker }
+                        if hasVideo { details(file?.lastPathComponent ?? "YouTube") }
+                        else if backToCamera != nil { linkPicker }
+                        else { picker }
                         if !status.isEmpty { Text(status).font(.caption) }
                     }.padding(16)
                 }
@@ -2604,12 +2630,6 @@ private struct PublishVideo: View {
         }
         .background(appBackground.ignoresSafeArea())
         .interactiveDismissDisabled(busy || importing)
-        .task(id: auth.account?.role) {
-            linkAvailable = false
-            guard auth.account?.role == "admin" else { return }
-            let capability: SourceCapability? = try? await request(sourceEndpoint)
-            if !Task.isCancelled { linkAvailable = capability?.available == true }
-        }
         .task(id: selection) {
             guard let selection else { return }
             importing = true
@@ -2668,13 +2688,6 @@ private struct PublishVideo: View {
             }.frame(maxWidth: .infinity).padding(.vertical, 26)
                 .background(creatorSurface, in: RoundedRectangle(cornerRadius: 16))
                 .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(lime.opacity(0.22), style: StrokeStyle(dash: [5, 5])))
-            if linkAvailable {
-                TextField("Ссылка на YouTube", text: $videoLink)
-                    .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .padding(12).creatorField().disabled(importing)
-                creatorButton("Далее") { Task { await loadLink() } }
-                    .disabled(importing || videoLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Публикация на канале").font(.caption2).foregroundStyle(.secondary)
                 Text(channel).font(.subheadline.weight(.semibold))
@@ -2682,6 +2695,22 @@ private struct PublishVideo: View {
                 .background(creatorSurface, in: RoundedRectangle(cornerRadius: 12))
             Label("Видео появится на канале после одобрения модератором.", systemImage: "info.circle")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var linkPicker: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Импорт с YouTube").font(.title2.bold())
+            HStack {
+                TextField("Ссылка на YouTube", text: $videoLink)
+                    .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .padding(12).creatorField()
+                PasteButton(payloadType: String.self) { values in
+                    if let value = values.first { videoLink = value }
+                }.labelStyle(.iconOnly).tint(lime)
+            }.disabled(importing)
+            creatorButton("Далее") { Task { await loadLink() } }
+                .disabled(importing || videoLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 
@@ -2794,12 +2823,14 @@ private struct PublishVideo: View {
     }
 
     private func loadLink() async {
-        guard !importing else { return }
+        guard auth.account?.role == "admin", backToCamera != nil, !importing else { return }
+        videoLink = videoLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !videoLink.isEmpty else { return }
         importing = true
         status = "Получаем сведения о видео…"
         defer { importing = false }
         do {
-            let preview: LinkPreview = try await request(sourceEndpoint + "/preview", method: "POST",
+            let preview: LinkPreview = try await request(publicationSourceEndpoint + "/preview", method: "POST",
                 json: ["url": videoLink], headers: ["X-Live-Publication": "1"])
             title = preview.title
             description = preview.description
@@ -2809,6 +2840,7 @@ private struct PublishVideo: View {
     }
 
     private func publishLink() async {
+        guard auth.account?.role == "admin", linkPreview != nil, !busy else { return }
         busy = true
         status = ""
         uploadPhase = "Сервер скачивает видео…"
@@ -2822,11 +2854,11 @@ private struct PublishVideo: View {
             ]
             if scheduled && !privateVideo { settings["publish_at"] = publishDate.timeIntervalSince1970 }
             if let cover { settings["cover"] = try await jpegImage(cover, maximum: 1280).base64EncodedString() }
-            var job: ImportJob = try await request(sourceEndpoint + "/publish", method: "POST",
+            var job: ImportJob = try await request(publicationSourceEndpoint + "/publish", method: "POST",
                 json: settings, headers: ["X-Live-Publication": "1"])
             while job.status == "downloading" {
                 try await Task.sleep(for: .seconds(2))
-                job = try await request(sourceEndpoint + "/status")
+                job = try await request(publicationSourceEndpoint + "/status")
             }
             guard job.status == "queued" else {
                 throw ServerError(status: 502, message: job.error ?? "Импорт был прерван.")
@@ -2910,21 +2942,34 @@ private struct PublishVideo: View {
 }
 
 
+private struct ChannelClipSelection: Identifiable {
+    let id: String
+    let clips: [Video]
+}
+
 private struct ChannelClipsGrid: View {
     let videos: [Video]
-    let open: (Video) -> Void
+    let open: (ChannelClipSelection) -> Void
     var body: some View {
-        let clips = videos.filter { $0.portraitQuality != nil && $0.status == "ready" && $0.published != false && ($0.moderation == nil || $0.moderation == "approved") }
+        let clips = videos.filter {
+            !$0.live && $0.portraitQuality != nil && $0.manifest != nil && $0.status == "ready" &&
+                $0.published != false && ($0.moderation == nil || $0.moderation == "approved")
+        }
         if clips.isEmpty {
             Text("Опубликованных клипов пока нет.").foregroundStyle(.secondary)
         } else {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                 ForEach(clips) { video in
-                    Button { open(video) } label: {
-                        Artwork(path: video.poster)
-                            .aspectRatio(9.0 / 16, contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }.buttonStyle(.plain).accessibilityLabel(video.title)
+                    Button { open(ChannelClipSelection(id: video.id, clips: clips)) } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Artwork(path: video.poster)
+                                .aspectRatio(9.0 / 16, contentMode: .fit)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            ClipViewsLabel(count: video.views ?? 0)
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.buttonStyle(.plain)
+                        .accessibilityLabel("\(video.title), просмотры: \((video.views ?? 0).formatted())")
                 }
             }
         }
@@ -2932,12 +2977,13 @@ private struct ChannelClipsGrid: View {
 }
 
 private struct ClipFromChannel: View {
-    let video: Video
+    let selection: ChannelClipSelection
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var auth: LiveSession
     var body: some View {
-        ClipsFeed(videos: [video], goHome: { dismiss() }, openCamera: nil,
-                  signedIn: auth.account != nil, requireLogin: auth.requireLogin, ownedChannelID: auth.ownedChannelID)
+        ClipsFeed(videos: selection.clips, goHome: { dismiss() }, openCamera: nil,
+                  signedIn: auth.account != nil, requireLogin: auth.requireLogin,
+                  ownedChannelID: auth.ownedChannelID, initialClipID: selection.id)
     }
 }
 

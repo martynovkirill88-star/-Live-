@@ -25,9 +25,11 @@ struct CaptureComposer: View {
     @State private var player: AVPlayer?
     @State private var movie: URL?
     @State private var gallery: PhotosPickerItem?
+    @State private var showingGallery = false
     @State private var working = false
     @State private var error: String?
     let onReady: (URL, String?) -> Void
+    let onLink: (() -> Void)?
     private enum Panel: Equatable { case music, masks }
     private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     private let background = Color(red: 0.063, green: 0.071, blue: 0.075)
@@ -82,7 +84,8 @@ struct CaptureComposer: View {
         }
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
-         .task { await camera.activate() }
+        .photosPicker(isPresented: $showingGallery, selection: $gallery, matching: .videos)
+        .task { await camera.activate() }
         .task(id: panel) {
             guard panel == .music, library.isEmpty else { return }
             catalogStatus = "Загружаем каталог…"
@@ -192,9 +195,8 @@ struct CaptureComposer: View {
                 .overlay(Capsule().strokeBorder(.white.opacity(0.17), lineWidth: 1))
                 .disabled(camera.recording || working)
             HStack {
-                PhotosPicker(selection: $gallery, matching: .videos) {
-                    control("photo.on.rectangle", "Галерея")
-                }.buttonStyle(.plain).opacity(camera.recording ? 0 : 1).disabled(camera.recording || working)
+                galleryControl
+                    .buttonStyle(.plain).opacity(camera.recording ? 0 : 1).disabled(camera.recording || working)
                 Spacer()
                 Button { capture() } label: {
                     ZStack {
@@ -219,6 +221,25 @@ struct CaptureComposer: View {
                     control("face.smiling", "Маски")
                 }.buttonStyle(.plain).opacity(camera.recording ? 0 : 1).disabled(camera.recording || working)
             }.padding(.horizontal, 28)
+        }
+    }
+
+    @ViewBuilder private var galleryControl: some View {
+        if let onLink {
+            Menu {
+                Button { showingGallery = true } label: {
+                    Label("Галерея", systemImage: "photo.on.rectangle")
+                }
+                Button(action: onLink) {
+                    Label("Ссылка на YouTube", systemImage: "link")
+                }
+            } label: {
+                control("photo.on.rectangle", "Галерея")
+            }
+        } else {
+            PhotosPicker(selection: $gallery, matching: .videos) {
+                control("photo.on.rectangle", "Галерея")
+            }
         }
     }
 

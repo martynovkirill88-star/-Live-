@@ -10,10 +10,16 @@ struct ClipsFeed: View {
     let signedIn: Bool
     let requireLogin: () -> Bool
     let ownedChannelID: String?
-    @State private var index = 0
+    var cameraPresented = false
+    var initialClipID: String? = nil
+    @State private var selectedClipID: String?
     @State private var savingVideo = false
     @State private var shareNotice: String?
     @State private var player: AVPlayer?
+    @State private var playbackClipID: String?
+    @State private var pausedByUser = false
+    @State private var viewedClipID: String?
+    @State private var viewCount: Int?
     @State private var progress = 0.0
     @State private var comments: WatchComments?
     @State private var showingComments = false
@@ -23,9 +29,13 @@ struct ClipsFeed: View {
     @State private var message = ""
     @State private var sending = false
     private let ticker = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
-    private var clip: Video? { videos.isEmpty ? nil : videos[min(index, videos.count - 1)] }
+    private var clipIndex: Int {
+        videos.firstIndex { $0.id == (selectedClipID ?? initialClipID) } ?? 0
+    }
+    private var clip: Video? { videos.isEmpty ? nil : videos[clipIndex] }
     private struct Reaction: Decodable { let liked: Bool; let likes: Int }
     private struct WriteReceipt: Decodable { let ok: Bool? }
+    private struct ViewReceipt: Decodable { let views: Int }
 
     var body: some View {
         ZStack {
@@ -41,6 +51,21 @@ struct ClipsFeed: View {
                 if let player { ClipVideoSurface(player: player) }
                 LinearGradient(colors: [.black.opacity(0.48), .clear, .clear, .black.opacity(0.88)],
                                startPoint: .top, endPoint: .bottom).allowsHitTesting(false)
+                if let player {
+                    Button {
+                        pausedByUser.toggle()
+                        updatePlayback(player)
+                    } label: {
+                        Color.clear.overlay {
+                            if pausedByUser {
+                                Image(systemName: "play.fill").font(.system(size: 27, weight: .semibold))
+                                    .frame(width: 64, height: 64)
+                                    .background(.black.opacity(0.56), in: Circle())
+                            }
+                        }.contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                        .accessibilityLabel(pausedByUser ? "Продолжить клип" : "Поставить клип на паузу")
+                }
                 VStack {
                     header
                     Spacer()
@@ -48,6 +73,7 @@ struct ClipsFeed: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(clip.channel).font(.headline)
                             Text(clip.title).font(.subheadline).lineLimit(2)
+                            ClipViewsLabel(count: viewCount ?? clip.views ?? 0).font(.caption)
                             Label("Звук видео", systemImage: "music.note").font(.caption2.bold())
                         }
                         Spacer()
@@ -69,11 +95,16 @@ struct ClipsFeed: View {
         .gesture(DragGesture(minimumDistance: 35).onEnded { gesture in
             let y = gesture.translation.height
             guard abs(y) > abs(gesture.translation.width), abs(y) > 45 else { return }
-            index = max(0, min(max(0, videos.count - 1), index + (y < 0 ? 1 : -1)))
+            let next = clipIndex + (y < 0 ? 1 : -1)
+            if videos.indices.contains(next) { selectedClipID = videos[next].id }
         })
         .task(id: clip?.id) {
             player?.pause()
+            playbackClipID = nil
             progress = 0
+            pausedByUser = false
+            viewedClipID = nil
+            viewCount = nil
             comments = nil
             reaction = nil
             draft = ""
@@ -87,7 +118,8 @@ struct ClipsFeed: View {
             guard let stream = url.url else { player = nil; return }
             let current = AVPlayer(url: stream)
             player = current
-            current.play()
+            playbackClipID = clip.id
+            updatePlayback(current)
             async let social: Reaction? = try? request(endpoint(clip) + "/social")
             async let thread: WatchComments? = try? request(endpoint(clip) + "/comments")
             let (latestReaction, latestComments) = await (social, thread)
@@ -100,12 +132,23 @@ struct ClipsFeed: View {
             guard let player, let item = player.currentItem else { return }
             let duration = item.duration.seconds, elapsed = player.currentTime().seconds
             if duration.isFinite && duration > 0 && elapsed.isFinite { progress = min(1, max(0, elapsed / duration)) }
+            if elapsed.isFinite, elapsed > 0, let clip, playbackClipID == clip.id, viewedClipID == nil {
+                viewedClipID = clip.id
+            }
+        }
+        .task(id: viewedClipID) {
+            guard let clip, viewedClipID == clip.id else { return }
+            let receipt: ViewReceipt? = try? await request(endpoint(clip) + "/view", method: "POST", json: [:])
+            if !Task.isCancelled, viewedClipID == clip.id { viewCount = receipt?.views }
         }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notice in
-            if let item = notice.object as? AVPlayerItem, item === player?.currentItem {
-                player?.seek(to: .zero)
-                player?.play()
+            if let player, let item = notice.object as? AVPlayerItem, item === player.currentItem {
+                player.seek(to: .zero)
+                updatePlayback(player)
             }
+        }
+        .onChange(of: cameraPresented) { _ in
+            if let player { updatePlayback(player) }
         }
         .onDisappear { player?.pause() }
         .alert("Поделиться", isPresented: Binding(
@@ -120,6 +163,11 @@ struct ClipsFeed: View {
                     .presentationDragIndicator(.visible)
             }
         }
+    }
+
+    private func updatePlayback(_ player: AVPlayer) {
+        if pausedByUser || cameraPresented { player.pause() }
+        else { player.play() }
     }
 
     private var header: some View {
@@ -283,6 +331,18 @@ struct ClipsFeed: View {
     }
 
     private func endpoint(_ clip: Video) -> String { "/api/media/" + clip.id }
+}
+
+struct ClipViewsLabel: View {
+    let count: Int
+
+    var body: some View {
+        Label {
+            Text(count.formatted())
+        } icon: {
+            Image(systemName: "eye")
+        }.accessibilityLabel("Просмотры: \(count.formatted())")
+    }
 }
 
 private struct ClipVideoSurface: UIViewRepresentable {
