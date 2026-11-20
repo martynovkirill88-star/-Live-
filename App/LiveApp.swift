@@ -30,7 +30,9 @@ struct Video: Codable, Identifiable, Hashable {
     struct Quality: Codable, Hashable {
         let code: String
         let height: Int
+        let width: Int?
         let bitrate: Int?
+        let source: Bool?
     }
     let id, title, channel: String
     let channel_id, channel_avatar, poster, manifest, description: String?
@@ -46,6 +48,18 @@ struct Video: Codable, Identifiable, Hashable {
     let views: Int?
     let live: Bool
     let qualities: [Quality]?
+
+    var portraitQuality: Quality? {
+        let measured = (qualities ?? []).filter { $0.width != nil }
+        if let original = measured.first(where: { $0.source == true }),
+           let width = original.width {
+            return original.height > width ? original : nil
+        }
+        return measured.first { quality in
+            guard let width = quality.width else { return false }
+            return quality.height > width
+        }
+    }
 }
 private struct Catalog: Decodable { let items: [Video] }
 private struct Channel: Decodable {
@@ -216,8 +230,7 @@ private struct Home: View {
                     CreatorHome()
                 } else if tab == "Клипы" {
                     ClipsFeed(videos: videos.filter {
-                        !$0.live && $0.status == "ready" && ($0.duration ?? 0) > 0 &&
-                        ($0.duration ?? .infinity) <= 120 && $0.manifest != nil
+                        !$0.live && $0.status == "ready" && $0.portraitQuality != nil && $0.manifest != nil
                     }, goHome: { selectTab("Главная") }, openCamera: { selectTab("Снять") })
                 } else {
                 ScrollView {

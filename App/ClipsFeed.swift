@@ -73,8 +73,14 @@ struct ClipsFeed: View {
             reaction = nil
             draft = ""
             message = ""
-            guard let clip, let url = remote(clip.manifest) else { player = nil; return }
-            let current = AVPlayer(url: url)
+            guard let clip, let quality = clip.portraitQuality, let manifest = remote(clip.manifest),
+                  var url = URLComponents(url: manifest, resolvingAgainstBaseURL: false) else {
+                player = nil
+                return
+            }
+            url.queryItems = [URLQueryItem(name: "quality", value: quality.code)]
+            guard let stream = url.url else { player = nil; return }
+            let current = AVPlayer(url: stream)
             player = current
             current.play()
             async let social: Reaction? = try? request(endpoint(clip) + "/social")

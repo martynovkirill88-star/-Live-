@@ -334,21 +334,21 @@ struct CaptureComposer: View {
                 let temporary = track?.filename != nil ? music : nil
                 do {
                     try await camera.record(seconds: seconds, microphone: track == nil) { result in
-                    player?.pause()
-                    player = nil
-                    working = true
-                    Task {
-                        defer {
-                            working = false
-                            if let temporary { try? FileManager.default.removeItem(at: temporary) }
+                        player?.pause()
+                        player = nil
+                        working = true
+                        Task {
+                            defer {
+                                working = false
+                                if let temporary { try? FileManager.default.removeItem(at: temporary) }
+                            }
+                            do {
+                                let url = try result.get()
+                                let edited = try await CameraExport.prepare(url, music: music, mask: effect)
+                                preview(edited)
+                            } catch { self.error = "Не удалось сохранить запись. " + error.localizedDescription }
                         }
-                        do {
-                            let url = try result.get()
-                            let edited = try await CameraExport.prepare(url, music: music, mask: effect)
-                            preview(edited)
-                        } catch { self.error = "Не удалось сохранить запись. " + error.localizedDescription }
                     }
-                }
                 } catch {
                     if let temporary { try? FileManager.default.removeItem(at: temporary) }
                     throw error

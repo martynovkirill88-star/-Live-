@@ -219,7 +219,6 @@ struct CameraSurface: UIViewRepresentable {
 
 enum CameraExport {
     @MainActor static func prepare(_ url: URL, music: URL?, mask: CameraMask) async throws -> URL {
-        guard music != nil || mask != .none else { return url }
         defer { try? FileManager.default.removeItem(at: url) }
         let source = AVURLAsset(url: url)
         let duration = try await source.load(.duration)
@@ -240,7 +239,7 @@ enum CameraExport {
         } else if music != nil { throw CameraError.export }
         guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality)
         else { throw CameraError.export }
-        if mask != .none {
+        do {
             let sticker = mask.artwork.flatMap { CIImage(image: $0) }
             let faces = mask.tracksFace ? ExportFaceTracker() : nil
             exporter.videoComposition = AVVideoComposition(asset: composition, applyingCIFiltersWithHandler: { request in
