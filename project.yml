@@ -43,8 +43,8 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Чепушка Live
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: 4.0.0
-        CURRENT_PROJECT_VERSION: 46
+        MARKETING_VERSION: 4.0.1
+        CURRENT_PROJECT_VERSION: 47
         INFOPLIST_KEY_NSCameraUsageDescription: Камера нужна для записи видео перед публикацией.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Микрофон нужен для записи звука видео и голосового поиска.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: Приложение распознаёт поисковый запрос на iPhone.

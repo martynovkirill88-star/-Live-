@@ -14,7 +14,7 @@ final class ClipCamera: NSObject, ObservableObject, AVCaptureFileOutputRecording
     private var videoInput: AVCaptureDeviceInput?
     private var microphoneInput: AVCaptureDeviceInput?
     private var completion: ((Result<URL, Error>) -> Void)?
-    private var position: AVCaptureDevice.Position = .back
+    private var position: AVCaptureDevice.Position = .front
 
     @MainActor func activate() async {
         guard await Self.authorized(for: .video) else {
@@ -174,7 +174,8 @@ enum CameraError: LocalizedError {
 
 struct CameraSurface: UIViewRepresentable {
     let session: AVCaptureSession
-    let catFace: AVMetadataFaceObject?
+    let mask: CameraMask
+    let face: AVMetadataFaceObject?
     func makeUIView(context: Context) -> Surface {
         let view = Surface()
         view.preview.session = session
@@ -185,31 +186,32 @@ struct CameraSurface: UIViewRepresentable {
         return view
     }
     func updateUIView(_ uiView: Surface, context: Context) {
-        uiView.face = catFace
+        uiView.face = face
+        uiView.maskEffect = mask
         uiView.setNeedsLayout()
     }
     final class Surface: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var preview: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
         var face: AVMetadataFaceObject?
-        private let sticker = UILabel()
+        var maskEffect = CameraMask.none
+        private let sticker = UIImageView()
 
         override func layoutSubviews() {
             super.layoutSubviews()
             if sticker.superview == nil {
-                sticker.text = "🐱"
-                sticker.textAlignment = .center
+                sticker.contentMode = .scaleAspectFit
                 sticker.isUserInteractionEnabled = false
                 addSubview(sticker)
             }
-            guard let face, let mapped = preview.transformedMetadataObject(for: face) else {
+            let faceBounds = face.flatMap { preview.transformedMetadataObject(for: $0)?.bounds }
+            guard let artwork = maskEffect.artwork,
+                  let frame = maskEffect.placement(in: bounds, face: faceBounds, yIncreasesUp: false) else {
                 sticker.isHidden = true
                 return
             }
-            let side = max(mapped.bounds.width, mapped.bounds.height) * 1.2
-            sticker.font = .systemFont(ofSize: side * 0.76)
-            sticker.frame = CGRect(x: mapped.bounds.midX - side / 2, y: mapped.bounds.midY - side / 2,
-                                   width: side, height: side)
+            sticker.image = artwork
+            sticker.frame = frame
             sticker.isHidden = false
         }
     }
@@ -239,8 +241,8 @@ enum CameraExport {
         guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality)
         else { throw CameraError.export }
         if mask != .none {
-            let sticker = mask.symbol.flatMap(makeSticker)
-            let faces = mask == .cat ? ExportFaceTracker() : nil
+            let sticker = mask.artwork.flatMap { CIImage(image: $0) }
+            let faces = mask.tracksFace ? ExportFaceTracker() : nil
             exporter.videoComposition = AVVideoComposition(asset: composition, applyingCIFiltersWithHandler: { request in
                 let bounds = request.sourceImage.extent
                 var image = request.sourceImage
@@ -248,15 +250,13 @@ enum CameraExport {
                 if mask == .neon {
                     image = image.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.55]).cropped(to: bounds)
                 }
-                if let sticker {
-                    let face = faces?.bounds(in: image, at: request.compositionTime)
-                    if faces == nil || face != nil {
-                        let size = face.map { max($0.width, $0.height) * 1.2 } ?? bounds.width * 0.19
-                        let center = face ?? bounds
-                        let scaled = sticker.transformed(by: CGAffineTransform(scaleX: size / sticker.extent.width, y: size / sticker.extent.height))
-                        let positioned = scaled.transformed(by: CGAffineTransform(translationX: center.midX - size / 2, y: center.midY - size / 2))
-                        image = positioned.composited(over: image).cropped(to: bounds)
-                    }
+                if let sticker,
+                   let frame = mask.placement(in: bounds, face: faces?.bounds(in: image, at: request.compositionTime),
+                                              yIncreasesUp: true) {
+                    let scaled = sticker.transformed(by: CGAffineTransform(scaleX: frame.width / sticker.extent.width,
+                                                                           y: frame.height / sticker.extent.height))
+                    let positioned = scaled.transformed(by: CGAffineTransform(translationX: frame.minX, y: frame.minY))
+                    image = positioned.composited(over: image).cropped(to: bounds)
                 }
                 request.finish(with: image, context: nil)
             })
@@ -273,14 +273,7 @@ enum CameraExport {
         return final
     }
 
-    @MainActor private static func makeSticker(_ symbol: String) -> CIImage? {
-        let size = CGSize(width: 120, height: 120)
-        let image = UIGraphicsImageRenderer(size: size).image { _ in
-            (symbol as NSString).draw(in: CGRect(x: 10, y: 10, width: 100, height: 100),
-                withAttributes: [.font: UIFont.systemFont(ofSize: 78)])
-        }
-        return CIImage(image: image)
-    }
+
 }
 
 

@@ -10,6 +10,8 @@ struct CaptureComposer: View {
     @StateObject private var camera = ClipCamera()
     @State private var seconds = 15
     @State private var elapsed = 0
+    @State private var recordingStarted: Date?
+    @State private var attribution: String?
     @State private var panel: Panel?
     @State private var mask = CameraMask.none
     @State private var chosen: CameraTrack?
@@ -20,7 +22,7 @@ struct CaptureComposer: View {
     @State private var gallery: PhotosPickerItem?
     @State private var working = false
     @State private var error: String?
-    let onReady: (URL) -> Void
+    let onReady: (URL, String?) -> Void
     private enum Panel { case music, masks }
     private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     private let background = Color(red: 0.063, green: 0.071, blue: 0.075)
@@ -39,17 +41,18 @@ struct CaptureComposer: View {
                     reviewActions(movie)
                 } else {
                     if camera.ready {
-                        CameraSurface(session: camera.session, catFace: mask == .cat ? camera.face : nil)
+                        CameraSurface(session: camera.session, mask: mask, face: mask.tracksFace ? camera.face : nil)
                             .saturation(mask == .retro ? 0.72 : (mask == .neon ? 1.48 : 1))
                             .ignoresSafeArea()
-                        if mask != .cat, let symbol = mask.symbol {
-                            Text(symbol).font(.system(size: geometry.size.width * 0.19))
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .allowsHitTesting(false).accessibilityHidden(true)
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            LinearGradient(colors: [.clear, .black.opacity(0.83), .black],
+                                startPoint: .top, endPoint: .bottom)
+                                .frame(height: 220 + geometry.safeAreaInsets.bottom)
                         }
-                        LinearGradient(colors: [.black.opacity(0), .black.opacity(0.83)],
-                            startPoint: .top, endPoint: .bottom)
-                            .frame(height: 220).ignoresSafeArea(edges: .bottom).allowsHitTesting(false)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea(.container, edges: .bottom)
+                        .allowsHitTesting(false)
                     }
                     VStack(spacing: 16) {
                         topBar
@@ -84,6 +87,7 @@ struct CaptureComposer: View {
                     throw URLError(.cannotDecodeContentData)
                 }
                 if Task.isCancelled { try? FileManager.default.removeItem(at: file.url); return }
+                attribution = nil
                 preview(file.url)
             } catch is CancellationError {} catch { self.error = "Не удалось открыть видео из галереи." }
         }
@@ -91,6 +95,7 @@ struct CaptureComposer: View {
             let duration = CMTimeGetSeconds(camera.output.recordedDuration)
             if camera.recording && duration.isFinite { elapsed = Int(duration) }
         }
+        .onChange(of: camera.recording) { recordingStarted = $0 ? Date() : nil }
         .onChange(of: camera.issue) { issue in if let issue { error = issue } }
         .onChange(of: scenePhase) { phase in
             if phase != .active {
@@ -109,18 +114,27 @@ struct CaptureComposer: View {
             round("xmark", label: "Закрыть") { dismiss() }
                 .disabled(camera.recording || working)
             Spacer()
-            Button {
-                sample = chosen
-                withAnimation(.easeInOut(duration: 0.22)) { panel = .music }
-            } label: {
-                Label(chosen?.title ?? "Музыка", systemImage: "music.note")
-                    .font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                    .frame(minWidth: panel == nil ? 157 : 98, minHeight: 44)
-                    .padding(.horizontal, 12)
-                    .background(.black.opacity(0.54), in: Capsule())
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 1))
-            }
-            .buttonStyle(.plain).disabled(camera.recording || working)
+            HStack(spacing: 5) {
+                Button {
+                    sample = chosen
+                    withAnimation(.easeInOut(duration: 0.22)) { panel = .music }
+                } label: {
+                    Label(chosen?.title ?? "Музыка", systemImage: "music.note")
+                        .font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                        .frame(minWidth: panel == nil ? 116 : 98, maxWidth: 156, minHeight: 44)
+                        .padding(.horizontal, 12)
+                        .background(.black.opacity(0.54), in: Capsule())
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 1))
+                }.buttonStyle(.plain)
+                if chosen != nil {
+                    round("xmark", label: "Убрать музыку") {
+                        chosen = nil
+                        sample = nil
+                        player?.pause()
+                        player = nil
+                    }
+                }
+            }.disabled(camera.recording || working)
             Spacer()
             round("arrow.trianglehead.camera.rotate", label: "Переключить камеру") { camera.flip() }
                 .disabled(camera.recording || working || !camera.ready)
@@ -168,8 +182,12 @@ struct CaptureComposer: View {
                     ZStack {
                         Circle().strokeBorder(.white.opacity(camera.recording ? 0.38 : 1), lineWidth: 2)
                         if camera.recording {
-                            Circle().trim(from: 0, to: min(1, Double(elapsed) / Double(seconds)))
-                                .stroke(.white, lineWidth: 2).rotationEffect(.degrees(-90))
+                            TimelineView(.animation(minimumInterval: 1.0 / 60)) { context in
+                                let time = recordingStarted.map { context.date.timeIntervalSince($0) } ?? 0
+                                Circle().trim(from: 0, to: min(1, max(0, time / Double(seconds))))
+                                    .stroke(.white, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                    .rotationEffect(.degrees(-90))
+                            }
                         }
                         RoundedRectangle(cornerRadius: camera.recording ? 8 : 36)
                             .fill(Color(red: 1, green: 0.14, blue: 0.24))
@@ -229,14 +247,19 @@ struct CaptureComposer: View {
                         ForEach(CameraTrack.catalog) { track in
                             Button { sampleTrack(track) } label: {
                                 HStack(spacing: 10) {
-                                    cameraArtwork("art-\(track.id)", fallback: "record.circle.fill")
+                                    cameraArtwork("art-\(track.id % 5)", fallback: "record.circle.fill")
                                         .frame(width: 42, height: 42)
                                         .overlay {
                                             if sampling && sample == track {
                                                 Image(systemName: "pause.fill").shadow(radius: 3)
                                             }
                                         }.clipShape(RoundedRectangle(cornerRadius: 8))
-                                    Text(track.title).font(.system(size: 14, weight: .medium))
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(track.title).font(.system(size: 14, weight: .medium))
+                                        if track.source != nil {
+                                            Text("Kevin MacLeod · CC BY 4.0").font(.system(size: 11)).foregroundStyle(.secondary)
+                                        }
+                                    }
                                     Spacer()
                                     Text(track.duration).font(.system(size: 13)).foregroundStyle(.white.opacity(0.62))
                                 }.padding(.horizontal, 7).frame(height: 52)
@@ -284,7 +307,11 @@ struct CaptureComposer: View {
 
     private func capture() {
         if camera.recording { camera.stop(); return }
-        let music = chosen?.url
+        let track = chosen
+        let effectCredit = mask.artwork == nil ? nil : CameraMask.credit
+        let music = track?.url
+        let credits = [track?.attribution, effectCredit].compactMap { $0 }
+        attribution = credits.isEmpty ? nil : credits.joined(separator: "\n\n")
         let effect = mask
         working = true
         elapsed = 0
@@ -333,7 +360,7 @@ struct CaptureComposer: View {
             .background(.white.opacity(0.13), in: Capsule())
             Button("Готово") {
                 player?.pause()
-                onReady(url)
+                onReady(url, attribution)
             }.frame(maxWidth: .infinity, minHeight: 46)
                 .background(.white, in: Capsule()).foregroundStyle(.black)
         }.buttonStyle(.plain).font(.headline).padding(16)
@@ -345,16 +372,52 @@ enum CameraMask: Int, CaseIterable, Identifiable {
     var id: Int { rawValue }
     var title: String { ["Без маски", "Искры", "Сердечки", "Кошка", "Космос", "Неон", "Облака", "Ретро", "Бабочки"][rawValue] }
     var icon: String { ["nosign", "sparkles", "heart", "cat", "globe", "bolt", "cloud", "film", "wand.and.stars"][rawValue] }
-    var symbol: String? { [nil, "✨", "💗", "🐱", "🪐", "⚡️", "☁️", nil, "🦋"][rawValue] }
+    static let credit = "Эффекты: Twemoji — Twitter, Inc. и авторы проекта. Графика наложена на видео. CC BY 4.0: https://creativecommons.org/licenses/by/4.0/ • https://github.com/jdecked/twemoji"
+    var tracksFace: Bool { [.cat, .sparkles, .hearts, .butterflies].contains(self) }
+    private static let artworkByID: [Int: UIImage] = Dictionary(uniqueKeysWithValues: allCases.compactMap { mask in
+        guard let url = Bundle.main.url(forResource: "effect-\(mask.id)", withExtension: "png", subdirectory: "CameraMusic"),
+              let image = UIImage(contentsOfFile: url.path) else { return nil }
+        return (mask.id, image)
+    })
+    var artwork: UIImage? { Self.artworkByID[id] }
+
+    func placement(in viewport: CGRect, face: CGRect?, yIncreasesUp: Bool) -> CGRect? {
+        guard !tracksFace || face != nil else { return nil }
+        var center = CGPoint(x: viewport.midX, y: viewport.midY)
+        var size = viewport.width * 0.19
+        if let face, tracksFace {
+            let scale = max(face.width, face.height)
+            if self == .cat {
+                center = CGPoint(x: face.midX, y: face.midY)
+                size = scale * 1.2
+            } else {
+                let left = self == .hearts
+                let up: CGFloat = yIncreasesUp ? 1 : -1
+                center = CGPoint(x: face.midX + face.width * (left ? -0.55 : 0.55),
+                                 y: face.midY + face.height * 0.48 * up)
+                size = scale * 0.55
+            }
+        }
+        return CGRect(x: center.x - size / 2, y: center.y - size / 2, width: size, height: size)
+    }
 }
 
 private struct CameraTrack: Identifiable, Equatable {
     let id: Int
     let title: String
     let duration: String
+    var source: String? = nil
     static let catalog = zip(
         ["Медленный свет", "После дождя", "Высота", "Держи ритм", "В этом городе"],
         ["2:48", "3:16", "2:37", "3:04", "2:59"]
-    ).enumerated().map { CameraTrack(id: $0.offset, title: $0.element.0, duration: $0.element.1) }
+    ).enumerated().map { CameraTrack(id: $0.offset, title: $0.element.0, duration: $0.element.1) } + [
+        CameraTrack(id: 5, title: "Carefree", duration: "3:25", source: "USUAN1400037"),
+        CameraTrack(id: 6, title: "Sneaky Snitch", duration: "2:17", source: "USUAN1100772"),
+        CameraTrack(id: 7, title: "Sneaky", duration: "2:31", source: "USUAN1100750")
+    ]
+    var attribution: String? {
+        guard let source else { return nil }
+        return "Музыка: \(title) — Kevin MacLeod (incompetech.com). Фрагмент синхронизирован с видео. CC BY 4.0: https://creativecommons.org/licenses/by/4.0/\nhttps://incompetech.com/music/royalty-free/index.html?isrc=\(source)"
+    }
     var url: URL? { Bundle.main.url(forResource: "track-\(id)", withExtension: "m4a", subdirectory: "CameraMusic") }
 }

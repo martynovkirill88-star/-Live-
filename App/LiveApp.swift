@@ -2445,12 +2445,13 @@ private struct EditPublishedVideo: View {
 private struct CameraPublicationFlow: View {
     let channel: String
     @State private var movie: URL?
+    @State private var musicCredit: String?
 
     var body: some View {
         if let movie {
-            PublishVideo(channel: channel, initialMovie: movie)
+            PublishVideo(channel: channel, initialMovie: movie, musicCredit: musicCredit)
         } else {
-            CaptureComposer { movie = $0 }
+            CaptureComposer { url, credit in musicCredit = credit; movie = url }
         }
     }
 }
@@ -2466,6 +2467,7 @@ private struct PublishVideo: View {
     @State private var coverPreview: UIImage?
     struct Transfer: Decodable { let id: String; let offset, chunk_size: Int }
     let channel: String
+    @State private var musicCredit: String?
     @Environment(\.dismiss) private var dismiss
     @State private var selection: PhotosPickerItem?
     @State private var importing = false
@@ -2486,8 +2488,9 @@ private struct PublishVideo: View {
     private struct SourceCapability: Decodable { let available: Bool }
     private struct LinkPreview: Decodable { let title, description: String; let thumbnail: URL }
     private struct ImportJob: Decodable { let status: String; let error: String? }
-    init(channel: String, initialMovie: URL? = nil) {
+    init(channel: String, initialMovie: URL? = nil, musicCredit: String? = nil) {
         self.channel = channel
+        _musicCredit = State(initialValue: musicCredit)
         _file = State(initialValue: initialMovie)
         _title = State(initialValue: initialMovie == nil ? "" : "Новое видео")
     }
@@ -2722,6 +2725,7 @@ private struct PublishVideo: View {
     private func clearMovie() {
         if let file { try? FileManager.default.removeItem(at: file) }
         file = nil
+        musicCredit = nil
         linkPreview = nil
         coverPreview = nil
     }
@@ -2773,6 +2777,11 @@ private struct PublishVideo: View {
         busy = true
         uploadPhase = "Подготавливаем видео…"
         status = ""
+        if let musicCredit, description.unicodeScalars.count + musicCredit.unicodeScalars.count + 2 > 4000 {
+            status = "Сократите описание, чтобы осталось место для указания авторов музыки и эффектов."
+            busy = false
+            return
+        }
         let accessed = file.startAccessingSecurityScopedResource()
         defer { if accessed { file.stopAccessingSecurityScopedResource() }; busy = false }
         do {
@@ -2807,8 +2816,10 @@ private struct PublishVideo: View {
                 progress = Double(state.offset) / Double(size)
             }
             uploadPhase = "Файл передан. Добавляем в очередь обработки…"
+            let publicationDescription = [description, musicCredit].compactMap { $0 }
+                .filter { !$0.isEmpty }.joined(separator: "\n\n")
             var settings: [String: Any] = [
-                "title": title, "description": description, "published": !privateVideo,
+                "title": title, "description": publicationDescription, "published": !privateVideo,
                 "publication_policy": privateVideo ? "private" : "public", "comments_enabled": commentsEnabled,
                 "category": category.rawValue
             ]
