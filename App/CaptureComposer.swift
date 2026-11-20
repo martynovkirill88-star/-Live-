@@ -20,6 +20,8 @@ struct CaptureComposer: View {
     @State private var query = ""
     @State private var catalogStatus = ""
     @State private var sampling = false
+    @State private var musicPreview: Task<Void, Never>?
+    @State private var previewFile: URL?
     @State private var player: AVPlayer?
     @State private var movie: URL?
     @State private var gallery: PhotosPickerItem?
@@ -119,7 +121,7 @@ struct CaptureComposer: View {
                 player?.pause()
             }
         }
-        .onDisappear { camera.shutdown(); player?.pause() }
+        .onDisappear { camera.shutdown(); player?.pause(); stopMusicPreview() }
         .alert("Камера", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("Понятно", role: .cancel) { error = nil }
         } message: { Text(error ?? "") }
@@ -307,23 +309,47 @@ struct CaptureComposer: View {
     }
 
     private func closePanel() {
-        sampling = false
-        player?.pause()
-        player = nil
+        stopMusicPreview()
         withAnimation(.easeInOut(duration: 0.22)) { panel = nil }
     }
 
+    private func stopMusicPreview() {
+        musicPreview?.cancel()
+        musicPreview = nil
+        sampling = false
+        player?.pause()
+        player = nil
+        if let previewFile {
+            try? FileManager.default.removeItem(at: previewFile)
+            self.previewFile = nil
+        }
+    }
+
     private func sampleTrack(_ track: CameraTrack) {
-        if sample == track && sampling {
-            player?.pause()
-            sampling = false
+        if sample == track && musicPreview != nil {
+            stopMusicPreview()
             return
         }
-        guard let url = track.url else { error = "Трек недоступен."; return }
+        stopMusicPreview()
         sample = track
-        sampling = true
-        player = AVPlayer(url: url)
-        player?.play()
+        musicPreview = Task {
+            do {
+                let file = try await track.recordingFile()
+                guard !Task.isCancelled else {
+                    if track.filename != nil { try? FileManager.default.removeItem(at: file) }
+                    return
+                }
+                if track.filename != nil { previewFile = file }
+                player = AVPlayer(url: file)
+                sampling = true
+                player?.play()
+            } catch {
+                if !Task.isCancelled {
+                    musicPreview = nil
+                    self.error = "Не удалось загрузить трек."
+                }
+            }
+        }
     }
 
     private func capture() {
@@ -483,9 +509,15 @@ private struct CameraTrack: Identifiable, Equatable {
         guard filename != nil else { return url }
         let (download, response) = try await URLSession.shared.download(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              http.mimeType?.hasPrefix("audio/") == true,
               let size = try download.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              (1...25_000_000).contains(size) else { throw URLError(.badServerResponse) }
+              (4...25_000_000).contains(size) else { throw URLError(.badServerResponse) }
+        let handle = try FileHandle(forReadingFrom: download)
+        defer { try? handle.close() }
+        let signature = Array(try handle.read(upToCount: 3) ?? Data())
+        guard signature.count == 3, signature == [0x49, 0x44, 0x33] ||
+              (signature[0] == 0xff && signature[1] & 0xe0 == 0xe0) else {
+            throw URLError(.cannotDecodeContentData)
+        }
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp3")
         try FileManager.default.moveItem(at: download, to: file)
         return file
