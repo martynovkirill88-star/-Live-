@@ -47,7 +47,7 @@ struct ClipsFeed: View {
                             Label("Звук видео", systemImage: "music.note").font(.caption2.bold())
                         }
                         Spacer()
-                        actions(clip)
+                        actions(clip).padding(.bottom, 42)
                     }
                     ProgressView(value: progress).tint(.white)
                 }.padding(16)
@@ -150,9 +150,9 @@ struct ClipsFeed: View {
 
     private func actionLabel(_ icon: String, _ count: Int?) -> some View {
         VStack(spacing: 3) {
-            Image(systemName: icon).font(.system(size: 24))
+            Image(systemName: icon).font(.system(size: 29, weight: .semibold))
             if let count { Text(count.formatted()).font(.caption2.bold()) }
-        }.frame(minWidth: 44, minHeight: 38)
+        }.frame(minWidth: 52, minHeight: 48).contentShape(Rectangle())
     }
 
     private func commentPanel(_ clip: Video) -> some View {
