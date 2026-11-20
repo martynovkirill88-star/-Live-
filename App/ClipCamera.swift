@@ -218,13 +218,17 @@ struct CameraSurface: UIViewRepresentable {
 }
 
 enum CameraExport {
-    @MainActor static func prepareGallery(_ url: URL) async throws -> URL {
+    @MainActor static func isPortrait(_ url: URL) async throws -> Bool {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw CameraError.export }
         let natural = try await track.load(.naturalSize)
         let transform = try await track.load(.preferredTransform)
         let oriented = CGRect(origin: .zero, size: natural).applying(transform).standardized.size
-        guard oriented.height > oriented.width else { return url }
+        return oriented.height > oriented.width
+    }
+
+    @MainActor static func prepareGallery(_ url: URL) async throws -> URL {
+        guard try await isPortrait(url) else { return url }
         return try await prepare(url, music: nil, mask: .none)
     }
 

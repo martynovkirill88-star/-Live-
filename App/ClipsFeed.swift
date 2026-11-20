@@ -5,7 +5,7 @@ import Combine
 struct ClipsFeed: View {
     let videos: [Video]
     let goHome: () -> Void
-    let openCamera: () -> Void
+    let openCamera: (() -> Void)?
     let signedIn: Bool
     let requireLogin: () -> Bool
     @State private var index = 0
@@ -119,8 +119,10 @@ struct ClipsFeed: View {
                 .accessibilityLabel("Главная")
             Text("Лента").font(.title.bold())
             Spacer()
-            Button(action: openCamera) { Image(systemName: "video").frame(width: 44, height: 44) }
-                .accessibilityLabel("Снять видео")
+            if let openCamera {
+                Button(action: openCamera) { Image(systemName: "video").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Снять видео")
+            }
         }.buttonStyle(.plain)
     }
 

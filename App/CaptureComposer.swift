@@ -464,10 +464,7 @@ private struct CameraTrack: Identifiable, Equatable {
     let duration: String
     var source: String? = nil
     var filename: String? = nil
-    static let catalog = zip(
-        ["Медленный свет", "После дождя", "Высота", "Держи ритм", "В этом городе"],
-        ["2:48", "3:16", "2:37", "3:04", "2:59"]
-    ).enumerated().map { CameraTrack(id: $0.offset, title: $0.element.0, duration: $0.element.1) } + [
+    static let catalog = [
         CameraTrack(id: 5, title: "Carefree", duration: "3:25", source: "USUAN1400037"),
         CameraTrack(id: 6, title: "Sneaky Snitch", duration: "2:17", source: "USUAN1100772"),
         CameraTrack(id: 7, title: "Sneaky", duration: "2:31", source: "USUAN1100750")
@@ -500,7 +497,7 @@ private struct CameraTrack: Identifiable, Equatable {
             let parts = length.split(separator: ":").compactMap { Int($0) }
             guard parts.count == 3, (parts[0] * 3600 + parts[1] * 60 + parts[2]) >= 120,
                   used.insert(code).inserted else { return nil }
-            return Self(id: index + catalog.count, title: title, duration: String(length.dropFirst(3)), source: code, filename: filename)
+            return Self(id: index + 100, title: title, duration: String(length.dropFirst(3)), source: code, filename: filename)
         }
     }
 

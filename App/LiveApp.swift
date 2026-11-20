@@ -1034,6 +1034,8 @@ private struct ChannelScreen: View {
     @State private var channel: Channel?
     @State private var failure = false
     @State private var about = false
+    @State private var showClips = false
+    @State private var selectedClip: Video?
     @AppStorage("followedChannels") private var followed = ""
     private var subscribed: Bool { followed.split(separator: ",").contains(Substring(id)) }
 
@@ -1069,14 +1071,17 @@ private struct ChannelScreen: View {
                         }
                     }
                     HStack(spacing: 24) {
-                        Button("Видео") { about = false }.foregroundStyle(about ? .secondary : lime)
-                        Button("О канале") { about = true }.foregroundStyle(about ? lime : .secondary)
+                        Button("Видео") { about = false; showClips = false }.foregroundStyle(!about && !showClips ? lime : .secondary)
+                        Button("Клипы") { about = false; showClips = true }.foregroundStyle(showClips ? lime : .secondary)
+                        Button("О канале") { about = true; showClips = false }.foregroundStyle(about ? lime : .secondary)
                     }.padding(.vertical, 8)
                     Divider()
                     if about {
                         Text(channel.profile.about ?? "Описание пока не добавлено.")
+                    } else if showClips {
+                        ChannelClipsGrid(videos: channel.videos) { selectedClip = $0 }
                     } else {
-                        ForEach(channel.videos) { video in
+                        ForEach(channel.videos.filter { $0.portraitQuality == nil }) { video in
                             NavigationLink(value: Route.video(video)) {
                                 HStack(alignment: .top) {
                                     Artwork(path: video.poster).frame(width: 110, height: 62)
@@ -1096,6 +1101,9 @@ private struct ChannelScreen: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(appBackground.ignoresSafeArea())
+        .fullScreenCover(item: $selectedClip) { video in
+            ClipFromChannel(video: video)
+        }
         .navigationTitle(channel?.profile.name ?? "Канал")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
@@ -2003,6 +2011,8 @@ private struct CreatorHome: View {
     @State private var subscribers: Int?
     @State private var editing = false
     @State private var publishing = false
+    @State private var showClips = false
+    @State private var selectedClip: Video?
     @State private var name = ""
     @State private var about = ""
     @State private var error = ""
@@ -2051,8 +2061,16 @@ private struct CreatorHome: View {
                             .frame(maxWidth: .infinity, minHeight: 36)
                     }.buttonStyle(.bordered)
                     Text("Ваши видео").font(.custom("DelaGothicOne-Regular", size: 19))
-                    if videos.isEmpty { Text("На канале пока нет видео.").foregroundStyle(.secondary) }
-                    ForEach(videos) { video in
+                    Picker("Ваши видео", selection: $showClips) {
+                        Text("Видео").tag(false)
+                        Text("Клипы").tag(true)
+                    }.pickerStyle(.segmented)
+                    if showClips {
+                        ChannelClipsGrid(videos: videos) { selectedClip = $0 }
+                    }
+                    let regular = videos.filter { $0.portraitQuality == nil }
+                    if !showClips && regular.isEmpty { Text("На канале пока нет обычных видео.").foregroundStyle(.secondary) }
+                    ForEach(showClips ? [] : regular) { video in
                         HStack(spacing: 10) {
                             if video.moderation == "rejected" {
                                 Button { rejectedVideo = video } label: {
@@ -2128,6 +2146,7 @@ private struct CreatorHome: View {
             let reason = video.moderation_note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             Text(reason.isEmpty ? "Модератор не указал причину." : reason)
         }
+        .fullScreenCover(item: $selectedClip) { video in ClipFromChannel(video: video) }
         .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await refreshVideos() } }) {
             CameraPublicationFlow(channel: profile?.name ?? "")
         }
@@ -2478,13 +2497,20 @@ private struct EditPublishedVideo: View {
 private struct CameraPublicationFlow: View {
     let channel: String
     @State private var movie: URL?
+    @State private var isClip = false
     @State private var musicCredit: String?
 
     var body: some View {
         if let movie {
-            PublishVideo(channel: channel, initialMovie: movie, musicCredit: musicCredit)
+            PublishVideo(channel: channel, initialMovie: movie, musicCredit: musicCredit, isClip: isClip)
         } else {
-            CaptureComposer { url, credit in musicCredit = credit; movie = url }
+            CaptureComposer { url, credit in
+                Task {
+                    isClip = (try? await CameraExport.isPortrait(url)) == true
+                    musicCredit = credit
+                    movie = url
+                }
+            }
         }
     }
 }
@@ -2500,6 +2526,7 @@ private struct PublishVideo: View {
     @State private var coverPreview: UIImage?
     struct Transfer: Decodable { let id: String; let offset, chunk_size: Int }
     let channel: String
+    let isClip: Bool
     @State private var musicCredit: String?
     @Environment(\.dismiss) private var dismiss
     @State private var selection: PhotosPickerItem?
@@ -2521,11 +2548,12 @@ private struct PublishVideo: View {
     private struct SourceCapability: Decodable { let available: Bool }
     private struct LinkPreview: Decodable { let title, description: String; let thumbnail: URL }
     private struct ImportJob: Decodable { let status: String; let error: String? }
-    init(channel: String, initialMovie: URL? = nil, musicCredit: String? = nil) {
+    init(channel: String, initialMovie: URL? = nil, musicCredit: String? = nil, isClip: Bool = false) {
         self.channel = channel
+        self.isClip = isClip
         _musicCredit = State(initialValue: musicCredit)
         _file = State(initialValue: initialMovie)
-        _title = State(initialValue: initialMovie == nil ? "" : "Новое видео")
+        _title = State(initialValue: isClip ? "Клип" : (initialMovie == nil ? "" : "Новое видео"))
     }
 
     private var hasVideo: Bool { file != nil || linkPreview != nil }
@@ -2670,12 +2698,14 @@ private struct PublishVideo: View {
                 Image(systemName: "checkmark").foregroundStyle(lime)
             }.font(.subheadline).padding(12)
                 .background(creatorSurface, in: RoundedRectangle(cornerRadius: 10))
-            HStack {
-                Text("Название видео")
-                Spacer()
-                Text("\(title.count) / 100")
-            }.font(.caption).foregroundStyle(.secondary)
-            TextField("Название", text: $title).padding(12).creatorField()
+            if !isClip {
+                HStack {
+                    Text("Название видео")
+                    Spacer()
+                    Text("\(title.count) / 100")
+                }.font(.caption).foregroundStyle(.secondary)
+                TextField("Название", text: $title).padding(12).creatorField()
+            }
             Text("Описание").font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $description).scrollContentBackground(.hidden)
                 .frame(height: 65).padding(8).creatorField()
@@ -2689,11 +2719,11 @@ private struct PublishVideo: View {
                                 placeholder: { surface.overlay(Image(systemName: "photo")) }
                         }
                         else { surface.overlay(Image(systemName: "photo")) }
-                    }.frame(width: 136, height: 76).clipShape(RoundedRectangle(cornerRadius: 9))
+                    }.frame(width: isClip ? 76 : 136, height: isClip ? 136 : 76).clipShape(RoundedRectangle(cornerRadius: 9))
                     VStack(alignment: .leading, spacing: 5) {
                         Text(cover == nil ? "Загрузить обложку" : "Заменить обложку")
                             .font(.caption.bold()).foregroundStyle(lime)
-                        Text("JPG или PNG · 16:9").font(.caption2).foregroundStyle(.secondary)
+                        Text(isClip ? "JPG или PNG · 9:16" : "JPG или PNG · 16:9").font(.caption2).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                 }.background(creatorSurface, in: RoundedRectangle(cornerRadius: 10))
@@ -2823,8 +2853,17 @@ private struct PublishVideo: View {
                 throw ServerError(status: 400, message: "Выберите видео размером до 2 ГБ.")
             }
             let coverData: Data?
-            if let cover { coverData = try await jpegImage(cover, maximum: 1280) }
-            else { coverData = nil }
+            if let cover {
+                let jpeg = try await jpegImage(cover, maximum: 1280)
+                coverData = isClip ? UIImage(data: jpeg).flatMap(portraitCover) : jpeg
+            } else if isClip {
+                let generator = AVAssetImageGenerator(asset: AVURLAsset(url: file))
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 720, height: 1280)
+                if let frame = try? await generator.image(at: .zero) {
+                    coverData = portraitCover(UIImage(cgImage: frame.image))
+                } else { coverData = nil }
+            } else { coverData = nil }
             let handle = try FileHandle(forReadingFrom: file)
             defer { try? handle.close() }
             let capabilities: Capabilities = try await request("/api/admin/publication-capabilities")
@@ -2870,6 +2909,50 @@ private struct PublishVideo: View {
     }
 }
 
+
+private struct ChannelClipsGrid: View {
+    let videos: [Video]
+    let open: (Video) -> Void
+    var body: some View {
+        let clips = videos.filter { $0.portraitQuality != nil && $0.status == "ready" && $0.published != false && ($0.moderation == nil || $0.moderation == "approved") }
+        if clips.isEmpty {
+            Text("Опубликованных клипов пока нет.").foregroundStyle(.secondary)
+        } else {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                ForEach(clips) { video in
+                    Button { open(video) } label: {
+                        Artwork(path: video.poster)
+                            .aspectRatio(9.0 / 16, contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }.buttonStyle(.plain).accessibilityLabel(video.title)
+                }
+            }
+        }
+    }
+}
+
+private struct ClipFromChannel: View {
+    let video: Video
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var auth: LiveSession
+    var body: some View {
+        ClipsFeed(videos: [video], goHome: { dismiss() }, openCamera: nil,
+                  signedIn: auth.account != nil, requireLogin: auth.requireLogin)
+    }
+}
+
+@MainActor
+private func portraitCover(_ image: UIImage) -> Data? {
+    let canvas = CGSize(width: 540, height: 960)
+    let scale = max(canvas.width / image.size.width, canvas.height / image.size.height)
+    let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    return UIGraphicsImageRenderer(size: canvas, format: format).image { _ in
+        image.draw(in: CGRect(x: (canvas.width - size.width) / 2, y: (canvas.height - size.height) / 2,
+                             width: size.width, height: size.height))
+    }.jpegData(compressionQuality: 0.84)
+}
 
 @MainActor
 private func jpegImage(_ selection: PhotosPickerItem, maximum: CGFloat) async throws -> Data {
