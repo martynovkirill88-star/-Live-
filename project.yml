@@ -13,6 +13,11 @@ targets:
     sources:
       - App/LiveApp.swift
       - App/MiniGamesView.swift
+      - App/CaptureComposer.swift
+      - App/ClipCamera.swift
+      - path: App/CameraMusic
+        type: folder
+        buildPhase: resources
       - App/OfflineDownloads.swift
       - App/OfflineDownloadPolicy.swift
       - App/TVSetup.swift
@@ -38,9 +43,10 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Чепушка Live
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: 3.9.4
-        CURRENT_PROJECT_VERSION: 45
-        INFOPLIST_KEY_NSMicrophoneUsageDescription: Микрофон нужен для голосового поиска видео.
+        MARKETING_VERSION: 4.0.0
+        CURRENT_PROJECT_VERSION: 46
+        INFOPLIST_KEY_NSCameraUsageDescription: Камера нужна для записи видео перед публикацией.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Микрофон нужен для записи звука видео и голосового поиска.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: Приложение распознаёт поисковый запрос на iPhone.
         SWIFT_VERSION: 5.0
 

@@ -2011,7 +2011,7 @@ private struct CreatorHome: View {
                     if let subscribers { Text("\(subscribers) подписчиков · \(videos.count) видео").font(.caption).foregroundStyle(lime) }
                     if !profile.about.isEmpty { Text(profile.about).font(.subheadline).foregroundStyle(.secondary) }
                     Button { publishing = true } label: {
-                        Label("Опубликовать видео", systemImage: "plus").frame(maxWidth: .infinity, minHeight: 36)
+                        Label("Снять видео", systemImage: "plus").frame(maxWidth: .infinity, minHeight: 36)
                     }.buttonStyle(.borderedProminent).foregroundStyle(appBackground)
                     Button { inStudio = true } label: {
                         Label("Студия автора", systemImage: "rectangle.stack")
@@ -2096,7 +2096,7 @@ private struct CreatorHome: View {
             Text(reason.isEmpty ? "Модератор не указал причину." : reason)
         }
         .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await refreshVideos() } }) {
-            PublishVideo(channel: profile?.name ?? "")
+            CameraPublicationFlow(channel: profile?.name ?? "")
         }
     }
 
@@ -2442,6 +2442,19 @@ private struct EditPublishedVideo: View {
     }
 }
 
+private struct CameraPublicationFlow: View {
+    let channel: String
+    @State private var movie: URL?
+
+    var body: some View {
+        if let movie {
+            PublishVideo(channel: channel, initialMovie: movie)
+        } else {
+            CaptureComposer { movie = $0 }
+        }
+    }
+}
+
 private struct PublishVideo: View {
     private struct Capabilities: Decodable { let publication_settings: Bool; let video_categories: Bool? }
     @State private var category: VideoCategory = .general
@@ -2473,6 +2486,12 @@ private struct PublishVideo: View {
     private struct SourceCapability: Decodable { let available: Bool }
     private struct LinkPreview: Decodable { let title, description: String; let thumbnail: URL }
     private struct ImportJob: Decodable { let status: String; let error: String? }
+    init(channel: String, initialMovie: URL? = nil) {
+        self.channel = channel
+        _file = State(initialValue: initialMovie)
+        _title = State(initialValue: initialMovie == nil ? "" : "Новое видео")
+    }
+
     private var hasVideo: Bool { file != nil || linkPreview != nil }
 
     var body: some View {
@@ -2855,7 +2874,7 @@ private func creatorButton(_ title: String, action: @escaping () -> Void) -> som
     }.buttonStyle(.plain)
 }
 
-private struct GalleryVideo: Transferable {
+struct GalleryVideo: Transferable {
     let url: URL
 
     static var transferRepresentation: some TransferRepresentation {
