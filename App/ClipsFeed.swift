@@ -154,13 +154,14 @@ struct ClipsFeed: View {
             let link = origin.appendingPathComponent("watch").appendingPathComponent(clip.id)
             if let channel = clip.channel_id, ownedChannelID == channel {
                 Menu {
-                    Button("Копировать ссылку", systemImage: "link") {
+                    Button {
                         UIPasteboard.general.url = link
                         shareNotice = "Ссылка скопирована."
-                    }
-                    Button("Скачать видео", systemImage: "arrow.down.to.line") {
+                    } label: { Label("Копировать ссылку", systemImage: "link") }
+                    Button {
                         Task { await saveVideo(clip) }
-                    }.disabled(savingVideo)
+                    } label: { Label("Скачать видео", systemImage: "arrow.down.to.line") }
+                        .disabled(savingVideo)
                 } label: {
                     if savingVideo { ProgressView().frame(width: 52, height: 48) }
                     else { actionLabel("square.and.arrow.up", nil) }
@@ -192,12 +193,29 @@ struct ClipsFeed: View {
             let movie = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
             try FileManager.default.moveItem(at: download, to: movie)
             defer { try? FileManager.default.removeItem(at: movie) }
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: movie)
+            do {
+                try await addToPhotos(movie)
+            } catch {
+                let conventional = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString + ".mov")
+                defer { try? FileManager.default.removeItem(at: conventional) }
+                guard let export = AVAssetExportSession(asset: AVURLAsset(url: movie),
+                                                         presetName: AVAssetExportPresetPassthrough) else { throw error }
+                export.outputURL = conventional
+                export.outputFileType = .mov
+                await export.export()
+                guard export.status == .completed else { throw export.error ?? error }
+                try await addToPhotos(conventional)
             }
             shareNotice = "Клип сохранён в «Фото»."
         } catch {
             shareNotice = error.localizedDescription
+        }
+    }
+
+    private func addToPhotos(_ movie: URL) async throws {
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: movie)
         }
     }
 
