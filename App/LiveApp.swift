@@ -177,6 +177,7 @@ private struct Home: View {
     @AppStorage("savedVideos") private var saved = ""
     private var visible: [Video] {
         let filtered = videos.filter { video in
+            if tab == "Главная" && !video.live && video.portraitQuality != nil { return false }
             let title = video.title + " " + (video.description ?? "")
             switch tab {
             case "Эфиры": return video.live
@@ -294,7 +295,7 @@ private struct Home: View {
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Route.self) { route in
                 switch route {
-                case .video(let video): Watch(video: video, others: videos.filter { $0.id != video.id })
+                case .video(let video): Watch(video: video, others: videos.filter { $0.id != video.id && $0.portraitQuality == nil })
                 case .channel(let id): ChannelScreen(id: id)
                 }
             }
@@ -618,7 +619,7 @@ private struct CatalogSearch: View {
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Route.self) { route in
                 switch route {
-                case .video(let video): Watch(video: video, others: videos.filter { $0.id != video.id })
+                case .video(let video): Watch(video: video, others: videos.filter { $0.id != video.id && $0.portraitQuality == nil })
                 case .channel(let id): ChannelScreen(id: id)
                 }
             }
@@ -1123,6 +1124,9 @@ struct WatchComments: Codable {
     struct Entry: Codable, Identifiable {
         let id: Int
         let can_delete: Bool?
+        let is_author: Bool?
+        let parent_id: Int?
+        let reply_to: String?
         let name: String
         let body: String
     }
@@ -1139,6 +1143,7 @@ struct Watch: View {
     }
     @EnvironmentObject private var auth: LiveSession
     @State private var draft = ""
+    @State private var replyTo: WatchComments.Entry?
     @State private var commentError = ""
     @State private var sending = false
     let video: Video
@@ -1306,9 +1311,12 @@ struct Watch: View {
         commentError = ""
         defer { sending = false }
         do {
+            var payload: [String: Any] = ["body": draft]
+            if let replyTo { payload["parent_id"] = replyTo.id }
             let _: WriteResult = try await request("/api/media/" + video.id + "/comments",
-                                                   method: "POST", json: ["body": draft])
+                                                   method: "POST", json: payload)
             draft = ""
+            replyTo = nil
             await loadComments()
         } catch { commentError = error.localizedDescription }
     }
@@ -1438,8 +1446,13 @@ struct Watch: View {
                             ForEach(comments.items) { entry in
                                 HStack(alignment: .top, spacing: 12) {
                                     VStack(alignment: .leading, spacing: 5) {
-                                        Text(entry.name).font(.caption).foregroundStyle(.secondary)
+                                        CommentAuthorLine(entry: entry)
                                         Text(entry.body)
+                                        if offlineRecord == nil && comments.enabled != false {
+                                            Button("Ответить") {
+                                                if auth.requireLogin() { replyTo = entry }
+                                            }.font(.caption)
+                                        }
                                     }.frame(maxWidth: .infinity, alignment: .leading)
                                     if offlineRecord == nil && entry.can_delete == true {
                                         Button(role: .destructive) { commentToDelete = entry } label: {
@@ -1463,6 +1476,13 @@ struct Watch: View {
                         } else if comments?.enabled == false {
                             Text("Комментарии отключены автором.").font(.caption)
                         } else if auth.account != nil {
+                            if let replyTo {
+                                HStack {
+                                    Text("Ответ для " + replyTo.name).font(.caption)
+                                    Spacer()
+                                    Button("Отменить") { self.replyTo = nil }.font(.caption)
+                                }
+                            }
                             HStack {
                                 TextField("Напишите комментарий", text: $draft, axis: .vertical)
                                     .textFieldStyle(.roundedBorder).lineLimit(1...4)
@@ -2963,13 +2983,17 @@ private struct ChannelClipsGrid: View {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                 ForEach(clips) { video in
                     Button { open(ChannelClipSelection(id: video.id, clips: clips)) } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Artwork(path: video.poster)
-                                .aspectRatio(9.0 / 16, contentMode: .fit)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                            ClipViewsLabel(count: video.views ?? 0)
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
+                        Artwork(path: video.poster)
+                            .aspectRatio(9.0 / 16, contentMode: .fit)
+                            .overlay(alignment: .bottomLeading) {
+                                ClipViewsLabel(count: video.views ?? 0)
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6).padding(.vertical, 4)
+                                    .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 5))
+                                    .padding(5)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                     }.buttonStyle(.plain)
                         .accessibilityLabel("\(video.title), просмотры: \((video.views ?? 0).formatted())")
                 }

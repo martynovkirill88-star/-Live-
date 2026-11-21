@@ -12,7 +12,10 @@ struct ClipsFeed: View {
     let ownedChannelID: String?
     var cameraPresented = false
     var initialClipID: String? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedClipID: String?
+    @State private var pagingForward = true
+    @State private var replyTo: WatchComments.Entry?
     @State private var savingVideo = false
     @State private var shareNotice: String?
     @State private var player: AVPlayer?
@@ -37,50 +40,60 @@ struct ClipsFeed: View {
     private struct WriteReceipt: Decodable { let ok: Bool? }
     private struct ViewReceipt: Decodable { let views: Int }
 
+    private var clipTransition: AnyTransition {
+        guard !reduceMotion else { return .identity }
+        return .asymmetric(insertion: .move(edge: pagingForward ? .bottom : .top),
+                           removal: .move(edge: pagingForward ? .top : .bottom))
+    }
+
     var body: some View {
         ZStack {
             Color.black
             if let clip {
-                if let poster = remote(clip.poster) {
-                    GeometryReader { geometry in
-                        AsyncImage(url: poster) { image in image.resizable().scaledToFill() }
-                            placeholder: { Color.black }
-                            .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                    }
-                }
-                if let player { ClipVideoSurface(player: player) }
-                LinearGradient(colors: [.black.opacity(0.48), .clear, .clear, .black.opacity(0.88)],
-                               startPoint: .top, endPoint: .bottom).allowsHitTesting(false)
-                if let player {
-                    Button {
-                        pausedByUser.toggle()
-                        updatePlayback(player)
-                    } label: {
-                        Color.clear.overlay {
-                            if pausedByUser {
-                                Image(systemName: "play.fill").font(.system(size: 27, weight: .semibold))
-                                    .frame(width: 64, height: 64)
-                                    .background(.black.opacity(0.56), in: Circle())
-                            }
-                        }.contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                        .accessibilityLabel(pausedByUser ? "Продолжить клип" : "Поставить клип на паузу")
-                }
-                VStack {
-                    header
-                    Spacer()
-                    HStack(alignment: .bottom) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(clip.channel).font(.headline)
-                            Text(clip.title).font(.subheadline).lineLimit(2)
-                            ClipViewsLabel(count: viewCount ?? clip.views ?? 0).font(.caption)
-                            Label("Звук видео", systemImage: "music.note").font(.caption2.bold())
+                ZStack {
+                    if let poster = remote(clip.poster) {
+                        GeometryReader { geometry in
+                            AsyncImage(url: poster) { image in image.resizable().scaledToFill() }
+                                placeholder: { Color.black }
+                                .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                         }
-                        Spacer()
-                        actions(clip).padding(.bottom, 42)
                     }
-                    ProgressView(value: progress).tint(.white)
-                }.padding(16)
+                    if let player, playbackClipID == clip.id { ClipVideoSurface(player: player) }
+                    LinearGradient(colors: [.black.opacity(0.48), .clear, .clear, .black.opacity(0.88)],
+                                   startPoint: .top, endPoint: .bottom).allowsHitTesting(false)
+                    if let player, playbackClipID == clip.id {
+                        Button {
+                            pausedByUser.toggle()
+                            updatePlayback(player)
+                        } label: {
+                            Color.clear.overlay {
+                                if pausedByUser {
+                                    Image(systemName: "play.fill").font(.system(size: 27, weight: .semibold))
+                                        .frame(width: 64, height: 64)
+                                        .background(.black.opacity(0.56), in: Circle())
+                                }
+                            }.contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                            .accessibilityLabel(pausedByUser ? "Продолжить клип" : "Поставить клип на паузу")
+                    }
+                    VStack {
+                        header
+                        Spacer()
+                        HStack(alignment: .bottom) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(clip.channel).font(.headline)
+                                Text(clip.title).font(.subheadline).lineLimit(2)
+                                ClipViewsLabel(count: viewCount ?? clip.views ?? 0).font(.caption)
+                                Label("Звук видео", systemImage: "music.note").font(.caption2.bold())
+                            }
+                            Spacer()
+                            actions(clip).padding(.bottom, 42)
+                        }
+                        ProgressView(value: progress).tint(.white)
+                    }.padding(16)
+                }
+                .id(clip.id)
+                .transition(clipTransition)
             } else {
                 VStack {
                     header
@@ -96,7 +109,11 @@ struct ClipsFeed: View {
             let y = gesture.translation.height
             guard abs(y) > abs(gesture.translation.width), abs(y) > 45 else { return }
             let next = clipIndex + (y < 0 ? 1 : -1)
-            if videos.indices.contains(next) { selectedClipID = videos[next].id }
+            guard videos.indices.contains(next) else { return }
+            pagingForward = y < 0
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.28)) {
+                selectedClipID = videos[next].id
+            }
         })
         .task(id: clip?.id) {
             player?.pause()
@@ -108,6 +125,7 @@ struct ClipsFeed: View {
             comments = nil
             reaction = nil
             draft = ""
+            replyTo = nil
             message = ""
             guard let clip, let quality = clip.portraitQuality, let manifest = remote(clip.manifest),
                   var url = URLComponents(url: manifest, resolvingAgainstBaseURL: false) else {
@@ -293,8 +311,11 @@ struct ClipsFeed: View {
                             Text(String(entry.name.prefix(1)).uppercased()).font(.caption.bold())
                                 .frame(width: 34, height: 34).background(.white.opacity(0.15), in: Circle())
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(entry.name).font(.caption.bold())
+                                CommentAuthorLine(entry: entry)
                                 Text(entry.body).font(.subheadline)
+                                if comments?.enabled != false && clip.comments_enabled != false {
+                                    Button("Ответить") { replyTo = entry }.font(.caption)
+                                }
                             }
                         }
                     }
@@ -302,6 +323,13 @@ struct ClipsFeed: View {
             }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
             if comments?.enabled != false && clip.comments_enabled != false {
+                if let replyTo {
+                    HStack {
+                        Text("Ответ для " + replyTo.name).font(.caption)
+                        Spacer()
+                        Button("Отменить") { self.replyTo = nil }.font(.caption)
+                    }
+                }
                 HStack(spacing: 10) {
                     TextField("Написать комментарий…", text: $draft)
                     Button {
@@ -312,8 +340,11 @@ struct ClipsFeed: View {
                         Task {
                             defer { sending = false }
                             do {
-                                let _: WriteReceipt = try await request(endpoint(clip) + "/comments", method: "POST", json: ["body": body])
+                                var payload: [String: Any] = ["body": body]
+                                if let replyTo { payload["parent_id"] = replyTo.id }
+                                let _: WriteReceipt = try await request(endpoint(clip) + "/comments", method: "POST", json: payload)
                                 draft = ""
+                                replyTo = nil
                                 comments = try await request(endpoint(clip) + "/comments")
                             } catch { message = error.localizedDescription }
                         }
@@ -357,5 +388,24 @@ private struct ClipVideoSurface: UIViewRepresentable {
     final class Surface: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    }
+}
+
+
+struct CommentAuthorLine: View {
+    let entry: WatchComments.Entry
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(entry.name).font(.caption.bold())
+            if entry.is_author == true {
+                Text("Автор").font(.caption2.bold())
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(.white.opacity(0.12), in: Capsule())
+            }
+        }
+        if let name = entry.reply_to {
+            Text("Ответ для " + name).font(.caption2).foregroundStyle(.secondary)
+        }
     }
 }
