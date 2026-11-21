@@ -49,6 +49,11 @@ struct Video: Codable, Identifiable, Hashable {
     let live: Bool
     let qualities: [Quality]?
 
+    var isPlayableClip: Bool {
+        !live && status == "ready" && portraitQuality != nil && manifest != nil &&
+            published != false && (moderation == nil || moderation == "approved")
+    }
+
     var portraitQuality: Quality? {
         let measured = (qualities ?? []).filter { $0.width != nil }
         if let original = measured.first(where: { $0.source == true }),
@@ -167,6 +172,15 @@ private struct Home: View {
     @State private var videos: [Video] = []
     @State private var failure = false
     @State private var tab = "Главная"
+    @State private var clipFromCover: Video?
+
+    private var playableClips: [Video] {
+        let catalogClips = videos.filter(\.isPlayableClip)
+        guard let clipFromCover, !catalogClips.contains(where: { $0.id == clipFromCover.id }) else {
+            return catalogClips
+        }
+        return [clipFromCover] + catalogClips
+    }
     @GestureState private var dockDragX: CGFloat?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let dockTabs = ["Главная", "Клипы", "Снять", "Канал"]
@@ -228,13 +242,14 @@ private struct Home: View {
                         }.padding(16)
                     }
                 } else if tab == "Канал" {
-                    CreatorHome()
+                    CreatorHome(openClip: openClip)
                 } else if tab == "Клипы" {
-                    ClipsFeed(videos: videos.filter {
-                        !$0.live && $0.status == "ready" && $0.portraitQuality != nil && $0.manifest != nil
-                    }, goHome: { selectTab("Главная") }, openCamera: { selectTab("Снять") },
-                       signedIn: auth.account != nil, requireLogin: auth.requireLogin,
-                       ownedChannelID: auth.ownedChannelID, cameraPresented: cameraFromDock)
+                    ClipsFeed(videos: playableClips, goHome: { selectTab("Главная") },
+                              openCamera: { selectTab("Снять") },
+                              signedIn: auth.account != nil, requireLogin: auth.requireLogin,
+                              ownedChannelID: auth.ownedChannelID, cameraPresented: cameraFromDock,
+                              initialClipID: clipFromCover?.id)
+                    .id(clipFromCover?.id)
                     .task { await load() }
                 } else {
                 ScrollView {
@@ -296,7 +311,7 @@ private struct Home: View {
             .navigationDestination(for: Route.self) { route in
                 switch route {
                 case .video(let video): Watch(video: video, others: videos.filter { $0.id != video.id && $0.portraitQuality == nil })
-                case .channel(let id): ChannelScreen(id: id)
+                case .channel(let id): ChannelScreen(id: id, openClip: openClip)
                 }
             }
             .task { await load() }
@@ -323,7 +338,7 @@ private struct Home: View {
             .onChange(of: scenePhase) { phase in
                 if phase == .active { Task { await auth.refreshWatchHistory() } }
             }
-            .fullScreenCover(isPresented: $search) { CatalogSearch(videos: videos) }
+            .fullScreenCover(isPresented: $search) { CatalogSearch(videos: videos, openClip: openClip) }
         }
     }
 
@@ -362,6 +377,14 @@ private struct Home: View {
     private func dockIndex(at x: CGFloat, width: CGFloat) -> Int {
         guard width > 0 else { return 0 }
         return Int(min(CGFloat(dockTabs.count - 1), max(0, x / width * CGFloat(dockTabs.count))))
+    }
+
+    private func openClip(_ video: Video) {
+        guard video.isPlayableClip else { return }
+        clipFromCover = video
+        search = false
+        path.removeAll()
+        selectTab("Клипы")
     }
 
     private func selectTab(_ title: String) {
@@ -547,6 +570,7 @@ private struct AccountSettings: View {
 
 private struct CatalogSearch: View {
     let videos: [Video]
+    let openClip: (Video) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var focused: Bool
@@ -620,7 +644,7 @@ private struct CatalogSearch: View {
             .navigationDestination(for: Route.self) { route in
                 switch route {
                 case .video(let video): Watch(video: video, others: videos.filter { $0.id != video.id && $0.portraitQuality == nil })
-                case .channel(let id): ChannelScreen(id: id)
+                case .channel(let id): ChannelScreen(id: id, openClip: openClip)
                 }
             }
         }
@@ -1034,11 +1058,11 @@ private struct FeedCard: View {
 private struct ChannelScreen: View {
     @EnvironmentObject private var auth: LiveSession
     let id: String
+    let openClip: (Video) -> Void
     @State private var channel: Channel?
     @State private var failure = false
     @State private var about = false
     @State private var showClips = false
-    @State private var selectedClip: ChannelClipSelection?
     @AppStorage("followedChannels") private var followed = ""
     private var subscribed: Bool { followed.split(separator: ",").contains(Substring(id)) }
 
@@ -1082,7 +1106,7 @@ private struct ChannelScreen: View {
                     if about {
                         Text(channel.profile.about ?? "Описание пока не добавлено.")
                     } else if showClips {
-                        ChannelClipsGrid(videos: channel.videos) { selectedClip = $0 }
+                        ChannelClipsGrid(videos: channel.videos, open: openClip)
                     } else {
                         ForEach(channel.videos.filter { $0.portraitQuality == nil }) { video in
                             NavigationLink(value: Route.video(video)) {
@@ -1104,9 +1128,6 @@ private struct ChannelScreen: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(appBackground.ignoresSafeArea())
-        .fullScreenCover(item: $selectedClip, onDismiss: { Task { await load() } }) { selection in
-            ClipFromChannel(selection: selection)
-        }
         .navigationTitle(channel?.profile.name ?? "Канал")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
@@ -2018,6 +2039,7 @@ private struct TelegramSignIn: View {
 }
 
 private struct CreatorHome: View {
+    let openClip: (Video) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @State private var editingVideo: Video?
     @State private var deletingVideo: Video?
@@ -2035,7 +2057,6 @@ private struct CreatorHome: View {
     @State private var editing = false
     @State private var publishing = false
     @State private var showClips = false
-    @State private var selectedClip: ChannelClipSelection?
     @State private var name = ""
     @State private var about = ""
     @State private var error = ""
@@ -2089,7 +2110,7 @@ private struct CreatorHome: View {
                         Text("Клипы").tag(true)
                     }.pickerStyle(.segmented)
                     if showClips {
-                        ChannelClipsGrid(videos: videos) { selectedClip = $0 }
+                        ChannelClipsGrid(videos: videos, open: openClip)
                     }
                     let regular = videos.filter { $0.portraitQuality == nil }
                     if !showClips && regular.isEmpty { Text("На канале пока нет обычных видео.").foregroundStyle(.secondary) }
@@ -2168,9 +2189,6 @@ private struct CreatorHome: View {
         } message: { video in
             let reason = video.moderation_note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             Text(reason.isEmpty ? "Модератор не указал причину." : reason)
-        }
-        .fullScreenCover(item: $selectedClip, onDismiss: { Task { await refreshVideos() } }) { selection in
-            ClipFromChannel(selection: selection)
         }
         .fullScreenCover(isPresented: $publishing, onDismiss: { Task { await refreshVideos() } }) {
             CameraPublicationFlow(channel: profile?.name ?? "")
@@ -2964,25 +2982,17 @@ private struct PublishVideo: View {
 }
 
 
-private struct ChannelClipSelection: Identifiable {
-    let id: String
-    let clips: [Video]
-}
-
 private struct ChannelClipsGrid: View {
     let videos: [Video]
-    let open: (ChannelClipSelection) -> Void
+    let open: (Video) -> Void
     var body: some View {
-        let clips = videos.filter {
-            !$0.live && $0.portraitQuality != nil && $0.manifest != nil && $0.status == "ready" &&
-                $0.published != false && ($0.moderation == nil || $0.moderation == "approved")
-        }
+        let clips = videos.filter(\.isPlayableClip)
         if clips.isEmpty {
             Text("Опубликованных клипов пока нет.").foregroundStyle(.secondary)
         } else {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                 ForEach(clips) { video in
-                    Button { open(ChannelClipSelection(id: video.id, clips: clips)) } label: {
+                    Button { open(video) } label: {
                         Artwork(path: video.poster)
                             .aspectRatio(9.0 / 16, contentMode: .fit)
                             .overlay(alignment: .bottomLeading) {
@@ -2999,17 +3009,6 @@ private struct ChannelClipsGrid: View {
                 }
             }
         }
-    }
-}
-
-private struct ClipFromChannel: View {
-    let selection: ChannelClipSelection
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var auth: LiveSession
-    var body: some View {
-        ClipsFeed(videos: selection.clips, goHome: { dismiss() }, openCamera: nil,
-                  signedIn: auth.account != nil, requireLogin: auth.requireLogin,
-                  ownedChannelID: auth.ownedChannelID, initialClipID: selection.id)
     }
 }
 

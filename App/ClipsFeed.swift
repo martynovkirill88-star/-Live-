@@ -24,10 +24,11 @@ struct ClipsFeed: View {
     @State private var viewedClipID: String?
     @State private var viewCount: Int?
     @State private var progress = 0.0
-    @State private var comments: WatchComments?
+    @State private var threads: [String: WatchComments] = [:]
     @State private var showingComments = false
-    @State private var reaction: Reaction?
-    @State private var reacting = false
+    @State private var reactions: [String: Reaction] = [:]
+    @State private var commentTotals: [String: Int] = [:]
+    @State private var reactingClips: Set<String> = []
     @State private var draft = ""
     @State private var message = ""
     @State private var sending = false
@@ -36,7 +37,11 @@ struct ClipsFeed: View {
         videos.firstIndex { $0.id == (selectedClipID ?? initialClipID) } ?? 0
     }
     private var clip: Video? { videos.isEmpty ? nil : videos[clipIndex] }
-    private struct Reaction: Decodable { let liked: Bool; let likes: Int }
+    private struct Reaction: Decodable, Equatable {
+        let liked: Bool
+        let likes: Int
+        let comments: Int?
+    }
     private struct WriteReceipt: Decodable { let ok: Bool? }
     private struct ViewReceipt: Decodable { let views: Int }
 
@@ -77,30 +82,24 @@ struct ClipsFeed: View {
                             .accessibilityLabel(pausedByUser ? "Продолжить клип" : "Поставить клип на паузу")
                     }
                     VStack {
-                        header
                         Spacer()
                         HStack(alignment: .bottom) {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(clip.channel).font(.headline)
                                 Text(clip.title).font(.subheadline).lineLimit(2)
-                                ClipViewsLabel(count: viewCount ?? clip.views ?? 0).font(.caption)
+                                ClipViewsLabel(count: (viewedClipID == clip.id ? viewCount : nil) ?? clip.views ?? 0).font(.caption)
                                 Label("Звук видео", systemImage: "music.note").font(.caption2.bold())
                             }
                             Spacer()
                             actions(clip).padding(.bottom, 42)
                         }
-                        ProgressView(value: progress).tint(.white)
+                        ProgressView(value: playbackClipID == clip.id ? progress : 0).tint(.white)
                     }.padding(16)
                 }
                 .id(clip.id)
                 .transition(clipTransition)
             } else {
-                VStack {
-                    header
-                    Spacer()
-                    Text("Коротких видео пока нет").foregroundStyle(.secondary)
-                    Spacer()
-                }.padding(16)
+                Text("Коротких видео пока нет").foregroundStyle(.secondary)
             }
         }
         .clipped()
@@ -115,6 +114,9 @@ struct ClipsFeed: View {
                 selectedClipID = videos[next].id
             }
         })
+        .overlay(alignment: .top) {
+            header.padding(.horizontal, 16).padding(.top, 16)
+        }
         .task(id: clip?.id) {
             player?.pause()
             playbackClipID = nil
@@ -122,8 +124,6 @@ struct ClipsFeed: View {
             pausedByUser = false
             viewedClipID = nil
             viewCount = nil
-            comments = nil
-            reaction = nil
             draft = ""
             replyTo = nil
             message = ""
@@ -139,12 +139,13 @@ struct ClipsFeed: View {
             player = current
             playbackClipID = clip.id
             updatePlayback(current)
-            async let social: Reaction? = try? request(endpoint(clip) + "/social")
-            async let thread: WatchComments? = try? request(endpoint(clip) + "/comments")
-            let (latestReaction, latestComments) = await (social, thread)
-            if !Task.isCancelled {
-                if reaction == nil { reaction = latestReaction }
-                if comments == nil { comments = latestComments }
+            let previousReaction = reactions[clip.id]
+            let previousTotal = commentTotals[clip.id]
+            let latest: Reaction? = try? await request(endpoint(clip) + "/social")
+            guard !Task.isCancelled, self.clip?.id == clip.id, let latest else { return }
+            if reactions[clip.id] == previousReaction { reactions[clip.id] = latest }
+            if commentTotals[clip.id] == previousTotal, let total = latest.comments {
+                commentTotals[clip.id] = total
             }
         }
         .onReceive(ticker) { _ in
@@ -203,20 +204,21 @@ struct ClipsFeed: View {
     }
 
     private func actions(_ clip: Video) -> some View {
-        VStack(spacing: 14) {
+        let reaction = reactions[clip.id]
+        return VStack(spacing: 14) {
             Button {
-                guard requireLogin(), !reacting else { return }
-                reacting = true
+                guard !reactingClips.contains(clip.id), requireLogin() else { return }
+                reactingClips.insert(clip.id)
                 Task {
-                    defer { reacting = false }
+                    defer { reactingClips.remove(clip.id) }
                     let result: Reaction? = try? await request(endpoint(clip) + "/like", method: "POST", json: [:])
-                    if self.clip?.id == clip.id, let result { reaction = result }
+                    if let result { reactions[clip.id] = result }
                 }
             } label: {
-                actionLabel(reaction?.liked == true ? "heart.fill" : "heart", reaction?.likes)
+                actionLabel(reaction?.liked == true ? "heart.fill" : "heart", reaction?.likes, showsCount: true)
             }.accessibilityLabel("Нравится")
             Button { showingComments = true } label: {
-                actionLabel("bubble", comments?.total)
+                actionLabel("bubble", commentTotals[clip.id], showsCount: true)
             }.accessibilityLabel("Комментарии")
             let link = origin.appendingPathComponent("watch").appendingPathComponent(clip.id)
             if let channel = clip.channel_id, ownedChannelID == channel {
@@ -286,15 +288,16 @@ struct ClipsFeed: View {
         }
     }
 
-    private func actionLabel(_ icon: String, _ count: Int?) -> some View {
+    private func actionLabel(_ icon: String, _ count: Int?, showsCount: Bool = false) -> some View {
         VStack(spacing: 3) {
             Image(systemName: icon).font(.system(size: 29, weight: .semibold))
-            if let count { Text(count.formatted()).font(.caption2.bold()) }
+            if showsCount { Text(count?.formatted() ?? "—").font(.caption2.bold()).monospacedDigit() }
         }.frame(minWidth: 52, minHeight: 48).contentShape(Rectangle())
     }
 
     private func commentPanel(_ clip: Video) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let comments = threads[clip.id]
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Комментарии").font(.headline)
                 if let comments { Text(comments.total.formatted()).font(.caption.bold()).foregroundStyle(.secondary) }
@@ -345,7 +348,7 @@ struct ClipsFeed: View {
                                 let _: WriteReceipt = try await request(endpoint(clip) + "/comments", method: "POST", json: payload)
                                 draft = ""
                                 replyTo = nil
-                                comments = try await request(endpoint(clip) + "/comments")
+                                try await loadComments(for: clip)
                             } catch { message = error.localizedDescription }
                         }
                     } label: { Image(systemName: "arrow.up").tint(.red) }
@@ -357,9 +360,16 @@ struct ClipsFeed: View {
         .padding(16)
         .background(Color(red: 0.06, green: 0.075, blue: 0.08).ignoresSafeArea())
         .task {
-            do { comments = try await request(endpoint(clip) + "/comments") }
+            do { try await loadComments(for: clip) }
             catch { if !Task.isCancelled { message = error.localizedDescription } }
         }
+    }
+
+    private func loadComments(for clip: Video) async throws {
+        let thread: WatchComments = try await request(endpoint(clip) + "/comments")
+        guard !Task.isCancelled else { return }
+        threads[clip.id] = thread
+        commentTotals[clip.id] = thread.total
     }
 
     private func endpoint(_ clip: Video) -> String { "/api/media/" + clip.id }
